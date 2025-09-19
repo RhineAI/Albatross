@@ -33,7 +33,7 @@ from torch.utils.cpp_extension import load
 HEAD_SIZE = 64
 
 load(name="rwkv7_state_fwd_fp16", sources=[f"{current_path}/cuda/rwkv7_state_fwd_fp16.cpp", f"{current_path}/cuda/rwkv7_state_fwd_fp16.cu"], is_python_module=False,
-                    verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}"])
+                    verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}"] + (["-Xptxas -O3"] if os.name != "nt" else []))
 class WKV_7(torch.autograd.Function):
     @staticmethod
     def forward(ctx, state, r, w, k, v, a, b):
@@ -49,6 +49,22 @@ class WKV_7(torch.autograd.Function):
             return y
 def RWKV7_OP(state, r, w, k, v, a, b):
     return WKV_7.apply(state, r, w, k, v, a, b)
+
+class WKV_7_one(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, state, r, w, k, v, a, b):
+        with torch.no_grad():
+            C = r.shape[0]
+            H = C // HEAD_SIZE
+            N = HEAD_SIZE
+            assert HEAD_SIZE == C // H
+            assert all(x.dtype == DTYPE for x in [r,w,k,v,a,b])
+            assert all(x.is_contiguous() for x in [r,w,k,v,a,b])
+            y = torch.empty((C), device=k.device, dtype=DTYPE, requires_grad=False, memory_format=torch.contiguous_format)
+            torch.ops.rwkv7_state_fwd_fp16.forward(1, 1, C, H, state, r, w, k, v, a, b, y)
+            return y
+def RWKV7_ONE_OP(state, r, w, k, v, a, b):
+    return WKV_7_one.apply(state, r, w, k, v, a, b)
 
 class WKV_7_batch(torch.autograd.Function):
     @staticmethod
@@ -89,6 +105,7 @@ class RWKV_x070(MyModule):
                 z[k] = z[k].t()
             z[k] = z[k].squeeze().to(dtype=DTYPE)
             if k.endswith('att.r_k'): z[k] = z[k].flatten()
+            z[k] = z[k].contiguous()
 
         z['emb.weight'] = F.layer_norm(z['emb.weight'], (args.n_embd,), weight=z['blocks.0.ln0.weight'], bias=z['blocks.0.ln0.bias'])
         z['blocks.0.att.v0'] = z['blocks.0.att.a0'] # actually ignored
@@ -162,7 +179,7 @@ class RWKV_x070(MyModule):
 
                 xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln1.weight'], bias=z[bbb+'ln1.bias'])
 
-                xx, v_first, state[1][i] = RWKV_x070_TMix_one(i, self.n_head, self.head_size, xx, state[0][i], v_first, state[1][i],
+                xx, v_first = RWKV_x070_TMix_one(i, self.n_head, self.head_size, xx, state[0][i], v_first, state[1][i],
                     z[att+'x_r'], z[att+'x_w'], z[att+'x_k'], z[att+'x_v'], z[att+'x_a'], z[att+'x_g'],
                     z[att+'w0'], z[att+'w1'], z[att+'w2'], z[att+'a0'], z[att+'a1'], z[att+'a2'], z[att+'v0'], z[att+'v1'], z[att+'v2'],
                     z[att+'g1'], z[att+'g2'], z[att+'k_k'], z[att+'k_a'], z[att+'r_k'],
@@ -257,21 +274,17 @@ def RWKV_x070_TMix_one(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x
     v = xv @ V_
     a = torch.sigmoid(a0 + (xa @ a1) @ a2)
     g = torch.sigmoid(xg @ g1) @ g2
-
-    kk = torch.nn.functional.normalize((k * k_k).view(H,N), dim=-1, p=2.0).view(H*N)
+    kk = F.normalize((k * k_k).view(H,N), dim=-1, p=2.0).view(H*N)
     k = k * (1 + (a-1) * k_a)
     if layer_id == 0: v_first = v
     else: v = v + (v_first - v) * torch.sigmoid(v0 + (xv @ v1) @ v2)
-    w = torch.exp(-0.606531 * torch.sigmoid((w0 + w).float())) # 0.606531 = exp(-0.5)
 
-    vk = v.view(H,N,1) @ k.view(H,1,N)
-    ab = (-kk).view(H,N,1) @ (kk*a).view(H,1,N)
-    state = state * w.view(H,1,N) + state @ ab.float() + vk.float()
-    xx = (state.to(dtype=x.dtype) @ r.view(H,N,1))
+    w = -F.softplus(-(w0 + w)) - 0.5
+    xx = RWKV7_ONE_OP(state, r, w, k, v, -kk, kk*a) # !!! using CUDA to modify state in-place !!! (faster too)
 
-    xx = torch.nn.functional.group_norm(xx.view(1,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(H*N)    
+    xx = F.group_norm(xx.view(1,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(H*N)    
     xx = xx + ((r * k * r_k).view(H,N).sum(dim=-1, keepdim=True) * v.view(H,N)).view(H*N)
-    return (xx * g) @ O_, v_first, state # !!! return state so it can be updated !!!
+    return (xx * g) @ O_, v_first
 
 @MyStatic
 def RWKV_x070_TMix_seq(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x_r, x_w, x_k, x_v, x_a, x_g, w0, w1, w2, a0, a1, a2, v0, v1, v2, g1, g2, k_k, k_a, r_k, R_, K_, V_, O_, ln_w, ln_b):
@@ -287,15 +300,15 @@ def RWKV_x070_TMix_seq(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x
     a = torch.sigmoid(a0 + (xa @ a1) @ a2)
     g = torch.sigmoid(xg @ g1) @ g2
 
-    kk = torch.nn.functional.normalize((k * k_k).view(T,H,N), dim=-1, p=2.0).view(T,H*N)
+    kk = F.normalize((k * k_k).view(T,H,N), dim=-1, p=2.0).view(T,H*N)
     k = k * (1 + (a-1) * k_a)
     if layer_id == 0: v_first = v
     else: v = v + (v_first - v) * torch.sigmoid(v0 + (xv @ v1) @ v2)
 
-    w = -torch.nn.functional.softplus(-(w0 + w)) - 0.5
+    w = -F.softplus(-(w0 + w)) - 0.5
     xx = RWKV7_OP(state, r, w, k, v, -kk, kk*a) # !!! using CUDA to modify state in-place !!!
 
-    xx = torch.nn.functional.group_norm(xx.view(T,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(T,H*N)
+    xx = F.group_norm(xx.view(T,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(T,H*N)
     xx = xx + ((r * k * r_k).view(T,H,N).sum(dim=-1, keepdim=True) * v.view(T,H,N)).view(T,H*N)
     return (xx * g) @ O_, v_first
 
@@ -313,15 +326,15 @@ def RWKV_x070_TMix_seq_batch(layer_id: int, H:int, N:int, x, x_prev, v_first, st
     a = torch.sigmoid(a0 + (xa @ a1) @ a2)
     g = torch.sigmoid(xg @ g1) @ g2
 
-    kk = torch.nn.functional.normalize((k * k_k).view(B,T,H,N), dim=-1, p=2.0).view(B,T,H*N)
+    kk = F.normalize((k * k_k).view(B,T,H,N), dim=-1, p=2.0).view(B,T,H*N)
     k = k * (1 + (a-1) * k_a)
     if layer_id == 0: v_first = v
     else: v = v + (v_first - v) * torch.sigmoid(v0 + (xv @ v1) @ v2)
 
-    w = -torch.nn.functional.softplus(-(w0 + w)) - 0.5
+    w = -F.softplus(-(w0 + w)) - 0.5
     xx = RWKV7_BATCH_OP(state, r, w, k, v, -kk, kk*a) # !!! using CUDA to modify state in-place !!!
 
-    xx = torch.nn.functional.group_norm(xx.view(B*T,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(B,T,H*N)
+    xx = F.group_norm(xx.view(B*T,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(B,T,H*N)
     xx = xx + ((r * k * r_k).view(B,T,H,N).sum(dim=-1, keepdim=True) * v.view(B,T,H,N)).view(B,T,H*N)
     return (xx * g) @ O_, v_first
 
