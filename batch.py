@@ -85,3 +85,65 @@ for n in range(BATCH_SIZE):
     print(prompts[n], end='')
     print(tokenizer.decode(tokens[n], utf8_errors="ignore"))
     print('#'*80)
+
+########################################################################################################
+
+# batch LAMBADA eval
+
+def eval_qa_batch(todo, print_interval, pad_eod = True, loss_mode = False, BATCH_SIZE = 1):
+    xsum = 0
+    xcnt = 0
+    xacc = 0
+
+    fwd_tasks = []
+    fwd_ids = []
+
+    def get_tokens(i):
+        d = todo[i]
+        if pad_eod:
+            src = [0] + tokenizer.encode(d[0])
+        else:
+            src = tokenizer.encode(d[0])
+        dst = tokenizer.encode(d[1])
+        return src, dst
+    
+    for i in range(len(todo)):
+        src, dst = get_tokens(i)
+        fwd_tasks.append(src+dst)
+        fwd_ids.append(i)
+        
+        if len(fwd_tasks) >= BATCH_SIZE or i == len(todo)-1:
+
+            out_batch = model.forward_batch(fwd_tasks, model.generate_zero_state(BATCH_SIZE), full_output=True)
+
+            for j in range(len(fwd_ids)):
+                logits = 0
+                correct = True
+                
+                out = out_batch[j]
+                oid = fwd_ids[j]
+                src, dst = get_tokens(oid)
+                for i in range(len(dst)):
+                    ooo = out[len(src)-1+i].float()
+                    probs = F.softmax(ooo, dim=-1)
+                    logits += math.log(probs[dst[i]])
+                    if torch.argmax(probs).item() != dst[i]:
+                        correct = False
+
+                xcnt += 1
+                xsum += logits
+                xacc += 1 if correct else 0
+                if xcnt % print_interval == 0 or xcnt == len(todo):
+                    if loss_mode:
+                        print('loss', round(-xsum / xcnt, 2), 'acc', round(xacc/xcnt*100, 1))
+                    else:
+                        print(xcnt, 'ppl', round(math.exp(-xsum / xcnt), 2), 'acc', round(xacc/xcnt*100, 1))
+            
+            fwd_tasks = []
+            fwd_ids = []
+
+with open(f"eval/lambada_test.jsonl", "r", encoding="utf-8") as f:
+    todo = [json.loads(line) for line in f]
+    todo = [[doc['text'].rsplit(' ', 1)[0], " " + doc['text'].rsplit(' ', 1)[1]] for doc in todo]
+
+eval_qa_batch(todo, print_interval=1000, BATCH_SIZE=256)

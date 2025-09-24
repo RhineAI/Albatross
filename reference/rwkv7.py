@@ -144,13 +144,16 @@ class RWKV_x070(MyModule):
     def forward_batch(self, tokens, state, full_output=False): # will modify state in-place
         assert type(tokens) is list
         lengths = [len(x) for x in tokens]
-        if len(set(lengths)) == 1:
+        if len(set(lengths)) == 1 and full_output == False:
             return self.forward_batch_same_length(tokens, state, full_output)
 
         bsz = len(tokens)
         pos = [0] * bsz
 
-        out = None
+        if full_output == False:
+            out = torch.empty((bsz, self.args.vocab_size), dtype=DTYPE, requires_grad=False, device="cuda")
+        else:
+            out = [torch.empty((0, self.args.vocab_size), dtype=DTYPE, requires_grad=False, device="cuda") for _ in range(bsz)]
         while True:
             active = [i for i in range(bsz) if pos[i] < lengths[i]]
             if not active:
@@ -160,13 +163,13 @@ class RWKV_x070(MyModule):
             batch_state = [state[0][:,:,active],state[1][:,active]] # state[0]=[Layer][2][Bsz][C]    state[1]=[Layer][Bsz][H][N][N]
             new_out = self.forward_batch_same_length(batch_tokens, batch_state, full_output)
             for k, i in enumerate(active):
-                if out != None:
+                if full_output == False:
                     out[i] = new_out[k]
+                else:
+                    out[i] = torch.cat([out[i], new_out[k]], dim=0)
                 state[0][:,:,i] = batch_state[0][:,:,k]
                 state[1][:,i] = batch_state[1][:,k]
                 pos[i] += step
-            if out == None:
-                out = new_out
         return out
 
     def forward_batch_same_length(self, tokens, state, full_output=False):
