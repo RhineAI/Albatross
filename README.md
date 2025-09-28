@@ -70,9 +70,9 @@ constexpr int ro1 = (int)2654435769, ro2 = (int)1779033704, ro3 = (int)314413427
 
 2. **Range of Values**:
    - $\text{ro1} \cdot A + \text{ro2} \cdot B + \text{ro3} \cdot C \in [-2^{31}, 2^{31}]$.
-   - $\texttt{rotator}(A, B, C) \in [-2^{-10}, 2^{-10}]$, equivalent to one or two ULP units of FP16 near 1 (the smallest number greater than 1 is $ 1.0009765625 $).
+   - $\texttt{rotator}(A, B, C) \in [-2^{-10}, 2^{-10}]$, equivalent to one or two ULP units of FP16 near 1 (the smallest number greater than 1 is $1.0009765625$).
 
-### 2.2 Dithering Around $ \exp2f(nexp\_half\_log2\_e \cdot w0) - 1 $
+### 2.2 Dithering Around `exp2f(nexp_half_log2_e * w0) - 1`
 
 The final decay factor is computed as:
 ```cpp
@@ -80,7 +80,7 @@ exp2f(nexp_half_log2_e * w0) - 1 + rotator(t0+_t, i, (int)blockIdx.x)
 ```
 
 - The term `exp2f(nexp_half_log2_e * w0) - 1` ensures $1 + w$ operates in range $[0.545, 1.0]$.
-- The dithering term $\text{rotator}(...)$ introduces a $\pm 2 \, \text{ULP}$ perturbation with a low-discrepancy pattern, breaking quantization symmetry.
+- The dithering term $\text{rotator}(...)$ introduces a $\pm 2 \text{ULP}$ perturbation with a low-discrepancy pattern, breaking quantization symmetry.
 
 ---
 
