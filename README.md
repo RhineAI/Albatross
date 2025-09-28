@@ -79,7 +79,7 @@ The final decay factor is computed as:
 exp2f(nexp_half_log2_e * w0) - 1 + rotator(t0+_t, i, (int)blockIdx.x)
 ```
 
-- The term $\exp2f(nexp\_half\_log2\_e \cdot w0) - 1$ ensures $1 + w$ operates in range $[0.545, 1.0]$.
+- The term `exp2f(nexp_half_log2_e * w0) - 1` ensures $1 + w$ operates in range $[0.545, 1.0]$.
 - The dithering term $\text{rotator}(...)$ introduces a $\pm 2 \, \text{ULP}$ perturbation with a low-discrepancy pattern, breaking quantization symmetry and recovering gradient flow.
 
 ---
