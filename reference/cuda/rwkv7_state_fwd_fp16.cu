@@ -26,7 +26,7 @@ __global__ void kernel_forward(const int B, const int T, const int C, const int 
         const int t = bbb*T*C + h*_N_ + i + _t * C;
         __syncthreads();
         r[i] = float(_r[t]);
-        w[i] = __expf(float(_w[t]));
+        w[i] = __expf(-0.6065306597f * float(_w[t])); // 0.6065306597 = exp(-0.5)
         k[i] = float(_k[t]);
         a[i] = float(_a[t]);
         b[i] = float(_b[t]);

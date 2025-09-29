@@ -291,7 +291,7 @@ def RWKV_x070_TMix_one(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x
     if layer_id == 0: v_first = v
     else: v = v + (v_first - v) * torch.sigmoid(v0 + (xv @ v1) @ v2)
 
-    w = -0.606531 * torch.sigmoid(w0 + w) # 0.606531 = exp(-0.5)
+    w = torch.sigmoid(w0 + w) # !!! here we are using different w !!!
     xx = RWKV7_ONE_OP(state, r, w, k, v, -kk, kk*a) # !!! using CUDA to modify state in-place !!! (faster too)
 
     xx = F.group_norm(xx.view(1,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(H*N)    
@@ -317,7 +317,7 @@ def RWKV_x070_TMix_seq(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x
     if layer_id == 0: v_first = v
     else: v = v + (v_first - v) * torch.sigmoid(v0 + (xv @ v1) @ v2)
 
-    w = -0.606531 * torch.sigmoid(w0 + w) # 0.606531 = exp(-0.5)
+    w = torch.sigmoid(w0 + w) # !!! here we are using different w !!!
     xx = RWKV7_OP(state, r, w, k, v, -kk, kk*a) # !!! using CUDA to modify state in-place !!!
 
     xx = F.group_norm(xx.view(T,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(T,H*N)
@@ -343,7 +343,7 @@ def RWKV_x070_TMix_seq_batch(layer_id: int, H:int, N:int, x, x_prev, v_first, st
     if layer_id == 0: v_first = v
     else: v = v + (v_first - v) * torch.sigmoid(v0 + (xv @ v1) @ v2)
 
-    w = -0.606531 * torch.sigmoid(w0 + w) # 0.606531 = exp(-0.5)
+    w = torch.sigmoid(w0 + w) # !!! here we are using different w !!!
     xx = RWKV7_BATCH_OP(state, r, w, k, v, -kk, kk*a) # !!! using CUDA to modify state in-place !!!
 
     xx = F.group_norm(xx.view(B*T,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(B,T,H*N)
