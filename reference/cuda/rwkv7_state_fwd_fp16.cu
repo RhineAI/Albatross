@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include "ATen/ATen.h"
+#include <ATen/cuda/CUDAContext.h>
 
 typedef at::Half dtype;
 
@@ -58,5 +59,6 @@ __global__ void kernel_forward(const int B, const int T, const int C, const int 
 void cuda_forward(int B, int T, int C, int H, float *state, dtype *r, dtype* w, dtype *k, dtype *v, dtype *a, dtype *b, dtype *y)
 {
     assert(H*_N_ == C);
-    kernel_forward<<<dim3(B * H), dim3(_N_)>>>(B, T, C, H, state, r, w, k, v, a, b, y);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    kernel_forward<<<dim3(B * H), dim3(_N_), 0, stream>>>(B, T, C, H, state, r, w, k, v, a, b, y);    
 }

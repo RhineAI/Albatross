@@ -139,7 +139,65 @@ times = np.percentile(times, SHOW_SPEED_PERCENTILE)
 all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
 print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
 
-# exit(0)
+#######################################################################################################
+
+xprint("Decode (CUDAGraph)")
+
+prompt = "User: simulate SpaceX mars landing using python\n\nAssistant: <think"
+LENGTH_PER_TRIAL = 256
+TEMPERATURE = 1.0
+TOP_P = 0.0
+print(prompt, end="")
+
+all_tokens = []
+out_last = 0
+state = model.generate_zero_state(0)
+out = model.forward(tokenizer.encode(prompt), state)
+token = sampler_simple(out, noise=0).item()
+
+x = model.z['emb.weight'][token]
+
+static_input = torch.empty_like(x, device="cuda")
+static_state = [None, None]
+static_state[0] = torch.empty_like(state[0], device="cuda")
+static_state[1] = torch.empty_like(state[1], device="cuda")
+static_output = torch.empty_like(out, device="cuda")
+
+g = torch.cuda.CUDAGraph()
+with torch.cuda.graph(g):
+    static_output = model.forward_one_alt(static_input, static_state)
+
+static_input.copy_(x)
+static_state[0].copy_(state[0])
+static_state[1].copy_(state[1])
+static_output.copy_(out)
+
+times = []
+all_times = []
+t000 = time.perf_counter()
+for i in range(LENGTH_PER_TRIAL):
+    t00 = time.perf_counter()
+    token = sampler_simple(static_output, noise=0).item()
+    all_tokens += [token]
+    try:
+        tmp = tokenizer.decode(all_tokens[out_last:], utf8_errors="strict")
+        print(tmp, end="", flush=True) # only print when we have a valid utf-8 string
+        out_last = i+1
+    except:
+        pass
+
+    static_input.copy_(model.z['emb.weight'][token])
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    g.replay()
+    torch.cuda.synchronize()
+    t1 = time.perf_counter()
+
+    times.append(t1 - t0)
+    all_times.append(t1 - t00)
+times = np.percentile(times, SHOW_SPEED_PERCENTILE)
+all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
+print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
 
 #######################################################################################################
 
