@@ -21,45 +21,9 @@ fi
 
 echo "Building libtriton_jit..."
 cd "$LIBTRITONJIT_DIR"
-cmake -DCUDA_TOOLKIT_ROOT_DIR=$CONDA_PREFIX \
-      -DCUDA_INCLUDE_DIRS=$CONDA_PREFIX/include \
-      -DCMAKE_CUDA_COMPILER=$CONDA_PREFIX/bin/nvcc \
-      -DCMAKE_PREFIX_PATH=$CONDA_PREFIX \
-      -DTorch_DIR=$CONDA_PREFIX/lib/python3.13/site-packages/torch/share/cmake/Torch \
-      -DCMAKE_FIND_ROOT_PATH=$CONDA_PREFIX \
-      -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
-      -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-      -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
-      -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
-      -DCUDA_CUDA_LIBRARY=$CONDA_PREFIX/lib/libcuda.so \
-      -DCUDA_CUDART_LIBRARY=$CONDA_PREFIX/lib/libcudart.so \
-      -S . -B build/ -DPython_ROOT="$(which python)/../.." -DCMAKE_INSTALL_PREFIX=../local
-cmake -DCUDA_TOOLKIT_ROOT_DIR=$CONDA_PREFIX \
-      -DCUDA_INCLUDE_DIRS=$CONDA_PREFIX/include \
-      -DCMAKE_CUDA_COMPILER=$CONDA_PREFIX/bin/nvcc \
-      -DCMAKE_PREFIX_PATH=$CONDA_PREFIX \
-      -DTorch_DIR=$CONDA_PREFIX/lib/python3.13/site-packages/torch/share/cmake/Torch \
-      -DCMAKE_FIND_ROOT_PATH=$CONDA_PREFIX \
-      -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
-      -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-      -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
-      -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
-      -DCUDA_CUDA_LIBRARY=$CONDA_PREFIX/lib/libcuda.so \
-      -DCUDA_CUDART_LIBRARY=$CONDA_PREFIX/lib/libcudart.so \
-      --build build/ --parallel
-cmake -DCUDA_TOOLKIT_ROOT_DIR=$CONDA_PREFIX \
-      -DCUDA_INCLUDE_DIRS=$CONDA_PREFIX/include \
-      -DCMAKE_CUDA_COMPILER=$CONDA_PREFIX/bin/nvcc \
-      -DCMAKE_PREFIX_PATH=$CONDA_PREFIX \
-      -DTorch_DIR=$CONDA_PREFIX/lib/python3.13/site-packages/torch/share/cmake/Torch \
-      -DCMAKE_FIND_ROOT_PATH=$CONDA_PREFIX \
-      -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
-      -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-      -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
-      -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
-      -DCUDA_CUDA_LIBRARY=$CONDA_PREFIX/lib/libcuda.so \
-      -DCUDA_CUDART_LIBRARY=$CONDA_PREFIX/lib/libcudart.so \
-      --install build/
+cmake -S . -B build/ -DPython_ROOT="$(which python)/../.." -DCMAKE_INSTALL_PREFIX=../local
+cmake --build build/ --parallel
+cmake --install build/
 
 # =========================
 # Clone & install FlagGems

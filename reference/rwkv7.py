@@ -19,17 +19,17 @@ torch._C._jit_set_autocast_mode(False)
 import torch.nn as nn
 from torch.nn import functional as F
 
-MyModule = torch.jit.ScriptModule
-MyFunction = torch.jit.script_method
-MyStatic = torch.jit.script
-# MyModule = nn.Module
-# MyFunction = torch.compile(mode='max-autotune-no-cudagraphs')
-# MyStatic = torch.compile(mode='max-autotune-no-cudagraphs')
-# MyDisable = torch.compiler.disable
+# MyModule = torch.jit.ScriptModule
+# MyFunction = torch.jit.script_method
+# MyStatic = torch.jit.script
+MyModule = nn.Module
+MyFunction = torch.compile(mode='max-autotune-no-cudagraphs')
+MyStatic = torch.compile(mode='max-autotune-no-cudagraphs')
+MyDisable = torch.compiler.disable
 def __nop(ob): return ob
 # MyFunction = __nop
 # MyStatic = __nop
-MyDisable = __nop
+# MyDisable = __nop
 
 DTYPE = torch.half
 
@@ -381,7 +381,13 @@ def RWKV_x070_TMix_seq_batch(layer_id: int, H:int, N:int, x, x_prev, v_first, st
     else: v = v + (v_first - v) * torch.sigmoid(v0 + (xv @ v1) @ v2)
 
     w += w0
-    xx = RWKV7_BATCH_OP(state, r, w, k, v, -kk, kka, elapsed_t)
+    # if T == 1:
+    #     vk = v.view(B,H,N,1) @ k.view(B,H,1,N)
+    #     ab = (-kk).view(B,H,N,1) @ (kk*a).view(B,H,1,N)
+    #     state = state * w.view(B,H,1,N) + state @ ab + vk
+    #     xx = (state.to(dtype=x.dtype) @ r.view(B,H,N,1)).view(B*T,H*N)
+    # else:
+    xx = RWKV7_BATCH_OP(state, r, w, k, v, -kk, kka, elapsed_t).view(B*T,H*N)
 
     xx = F.group_norm(xx.view(B*T,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(B,T,H*N)
     xx = xx + ((r * k * r_k).view(B,T,H,N).sum(dim=-1, keepdim=True) * v.view(B,T,H,N)).view(B,T,H*N)
@@ -395,8 +401,8 @@ def RWKV_x070_CMix_one(x, x_prev, x_k, K_, V_):
     x_prev[1] = x
     k = x + xx * x_k
     k = torch.relu(k @ K_) ** 2
-    # kv = k @ V_
-    kv = torch.ops.flag_gems.rwkv_mm_sparsity(k, V_)
+    kv = k @ V_
+    # kv = torch.ops.flag_gems.rwkv_mm_sparsity(k, V_)
     return kv
 
 @MyStatic

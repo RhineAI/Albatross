@@ -10,7 +10,7 @@ import torch, types, copy
 import numpy as np
 from torch.nn import functional as F
 
-GRID_W, GRID_H = 20, 16
+GRID_W, GRID_H = 40, 24
 # GRID_W, GRID_H = 20, 4
 NUM_PANELS = GRID_W * GRID_H
 BATCH_SIZE = NUM_PANELS
@@ -28,7 +28,7 @@ args.head_size = 64
 # args.MODEL_NAME = "/mnt/e/RWKV-Runner/models/rwkv7-g1a-0.4b-20250905-ctx4096"
 # args.MODEL_NAME = "/mnt/e/RWKV-Runner/models/rwkv7-g1-1.5b-20250429-ctx4096"
 # args.MODEL_NAME = "/mnt/e/RWKV-Runner/models/rwkv7-g1-2.9b-20250519-ctx4096"
-args.MODEL_NAME = "/mnt/e/RWKV-Runner/models/rwkv7-g0a-7.2b-20250829-ctx4096"
+args.MODEL_NAME = "/home/ruichongzhang/rwkv7-g0a-7.2b-20250829-ctx4096"
 # args.MODEL_NAME = "/home/molly/rwkv7-g0a-7.2b-20250829-ctx4096"
 
 TITLE_MODEL_NAME = "RWKV-7 7.2B"

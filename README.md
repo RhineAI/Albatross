@@ -103,5 +103,5 @@ Performance comparison between FP16 and FP32 implementations is shown below:
 - This demonstrates that the proposed FP16 implementation achieves **near-FP32 accuracy** while significantly reducing memory and computation costs.
 
 
-
-
+# Result @ 251008
+Now over 10000 tokens/s on RTX5090 (bsz960). Special thanks to [@blealtan](https://github.com/blealtan) for implementing swizzling for coalesced state r/w. There is still plenty of room for optimization.
