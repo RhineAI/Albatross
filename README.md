@@ -1,6 +1,10 @@
 # Albatross
 efficient RWKV inference engine
 
+## Result @ 251009
+
+10000+ token/s obtained in https://github.com/MollySophia/Albatross/tree/fp16
+
 ## Result @ 251007
 
 1.3x 7B decoding and 5x 0.1B decoding, with CUDAGraph.
