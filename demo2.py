@@ -65,6 +65,7 @@ from reference.utils import TRIE_TOKENIZER, sampler_simple_batch
 def computation_process(text_queue, shutdown_event, control_queue=None):
     """Computation process that runs the model inference and sends results to UI"""
     global current_prompt
+    state = None
     try:
         # Initialize model
         model = RWKV_x070(args)
@@ -73,8 +74,11 @@ def computation_process(text_queue, shutdown_event, control_queue=None):
         while True:
             if shutdown_event.is_set():
                 break
-            
+
             try:
+                if state is not None:
+                    del state
+                    torch.cuda.empty_cache()
                 # Initialize state
                 state = model.generate_zero_state(BATCH_SIZE)
                 
