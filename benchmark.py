@@ -29,7 +29,7 @@ args.head_size = 64
 # args.MODEL_NAME = "/mnt/e/RWKV-Runner/models/rwkv7-g1a-0.4b-20250905-ctx4096"
 # args.MODEL_NAME = "/mnt/e/RWKV-Runner/models/rwkv7-g1-1.5b-20250429-ctx4096"
 # args.MODEL_NAME = "/mnt/e/RWKV-Runner/models/rwkv7-g1-2.9b-20250519-ctx4096"
-args.MODEL_NAME = "/home/ruichongzhang/rwkv7-g0a-7.2b-20250829-ctx4096"
+args.MODEL_NAME = "/models/rwkv7-g0a-7.2b-20250829-ctx4096"
 
 print(f'\nUsing CUDA fp16. Loading {args.MODEL_NAME} ...\n')
 
@@ -53,95 +53,95 @@ def xprint(s):
     c0, c1 = 3, 80-len(s)-3
     print(f"\n{'#'*c0} {s} {'#'*c1}\n")
 
-# xprint("Basic")
+xprint("Basic")
 
-# prompt = "The Eiffel tower is in the city of"
-# print(prompt)
+prompt = "The Eiffel tower is in the city of"
+print(prompt)
 
-# init_out = model.forward(tokenizer.encode(prompt), model.generate_zero_state(0))
-# probs = F.softmax(init_out.float(), dim=-1) # compute softmax in float (more accurate)
-# _, indices = torch.topk(probs, 5) # print top-5 possibilities
-# for i in range(len(indices)):
-#     token_id = indices[i].item()
-#     token = tokenizer.decode([token_id])
-#     token_prob = probs[token_id].item()
-#     print(repr(token), f'[probability {token_prob:.2%}]')
+init_out = model.forward(tokenizer.encode(prompt), model.generate_zero_state(0))
+probs = F.softmax(init_out.float(), dim=-1) # compute softmax in float (more accurate)
+_, indices = torch.topk(probs, 5) # print top-5 possibilities
+for i in range(len(indices)):
+    token_id = indices[i].item()
+    token = tokenizer.decode([token_id])
+    token_prob = probs[token_id].item()
+    print(repr(token), f'[probability {token_prob:.2%}]')
 
-# ########################################################################################################
+########################################################################################################
 
-# xprint("Batch")
+xprint("Batch")
 
-# prompts = ["The apple can be", "The cat can't be", "Q: 1+1=?\nA: 1+1=2."]
-# tokens = [tokenizer.encode(prompt) for prompt in prompts]
+prompts = ["The apple can be", "The cat can't be", "Q: 1+1=?\nA: 1+1=2."]
+tokens = [tokenizer.encode(prompt) for prompt in prompts]
 
-# print(tokens)
-# for prompt in prompts:
-#     print(prompt)
-#     init_out = model.forward(tokenizer.encode(prompt), model.generate_zero_state(0))
-#     probs = F.softmax(init_out.float(), dim=-1) # compute softmax in float (more accurate)
-#     _, indices = torch.topk(probs, 5) # print top-5 possibilities
-#     for i in range(len(indices)):
-#         token_id = indices[i].item()
-#         token = tokenizer.decode([token_id])
-#         token_prob = probs[token_id].item()
-#         print(repr(token), f'[probability {token_prob:.2%}]')
+print(tokens)
+for prompt in prompts:
+    print(prompt)
+    init_out = model.forward(tokenizer.encode(prompt), model.generate_zero_state(0))
+    probs = F.softmax(init_out.float(), dim=-1) # compute softmax in float (more accurate)
+    _, indices = torch.topk(probs, 5) # print top-5 possibilities
+    for i in range(len(indices)):
+        token_id = indices[i].item()
+        token = tokenizer.decode([token_id])
+        token_prob = probs[token_id].item()
+        print(repr(token), f'[probability {token_prob:.2%}]')
 
-# init_outs = model.forward_batch(tokens, model.generate_zero_state(len(prompts)))
-# for n in range(len(prompts)):
-#     print(prompts[n])
-#     init_out = init_outs[n]
-#     probs = F.softmax(init_out.float(), dim=-1) # compute softmax in float (more accurate)
-#     _, indices = torch.topk(probs, 5) # print top-5 possibilities
-#     for i in range(len(indices)):
-#         token_id = indices[i].item()
-#         token = tokenizer.decode([token_id], utf8_errors="replace")
-#         token_prob = probs[token_id].item()
-#         print(repr(token), f'[probability {token_prob:.2%}]')
-#     if n != len(prompts)-1:
-#         print()
+init_outs = model.forward_batch(tokens, model.generate_zero_state(len(prompts)))
+for n in range(len(prompts)):
+    print(prompts[n])
+    init_out = init_outs[n]
+    probs = F.softmax(init_out.float(), dim=-1) # compute softmax in float (more accurate)
+    _, indices = torch.topk(probs, 5) # print top-5 possibilities
+    for i in range(len(indices)):
+        token_id = indices[i].item()
+        token = tokenizer.decode([token_id], utf8_errors="replace")
+        token_prob = probs[token_id].item()
+        print(repr(token), f'[probability {token_prob:.2%}]')
+    if n != len(prompts)-1:
+        print()
 
-# ########################################################################################################
+########################################################################################################
 
-# xprint("Decode")
+xprint("Decode")
 
-# prompt = "User: simulate SpaceX mars landing using python\n\nAssistant: <think"
-# LENGTH_PER_TRIAL = 256
-# TEMPERATURE = 1.0
-# TOP_P = 0.0
-# print(prompt, end="")
+prompt = "User: simulate SpaceX mars landing using python\n\nAssistant: <think"
+LENGTH_PER_TRIAL = 256
+TEMPERATURE = 1.0
+TOP_P = 0.0
+print(prompt, end="")
 
-# all_tokens = []
-# out_last = 0
-# state = model.generate_zero_state(0)
-# out = model.forward(tokenizer.encode(prompt), state)
+all_tokens = []
+out_last = 0
+state = model.generate_zero_state(0)
+out = model.forward(tokenizer.encode(prompt), state)
 
-# times = []
-# all_times = []
-# t000 = time.perf_counter()
-# for i in range(LENGTH_PER_TRIAL):
-#     t00 = time.perf_counter()
-#     token = sampler_simple(out, noise=0).item()
-#     all_tokens += [token]
-#     try:
-#         tmp = tokenizer.decode(all_tokens[out_last:], utf8_errors="strict")
-#         print(tmp, end="", flush=True) # only print when we have a valid utf-8 string
-#         out_last = i+1
-#     except:
-#         pass
-#     torch.cuda.synchronize()
-#     t0 = time.perf_counter()
-#     out = model.forward(token, state)
-#     torch.cuda.synchronize()
-#     t1 = time.perf_counter()
-#     times.append(t1 - t0)
-#     all_times.append(t1 - t00)
-# times = np.percentile(times, SHOW_SPEED_PERCENTILE)
-# all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
-# print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
+times = []
+all_times = []
+t000 = time.perf_counter()
+for i in range(LENGTH_PER_TRIAL):
+    t00 = time.perf_counter()
+    token = sampler_simple(out, noise=0).item()
+    all_tokens += [token]
+    try:
+        tmp = tokenizer.decode(all_tokens[out_last:], utf8_errors="strict")
+        print(tmp, end="", flush=True) # only print when we have a valid utf-8 string
+        out_last = i+1
+    except:
+        pass
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    out = model.forward(token, state)
+    torch.cuda.synchronize()
+    t1 = time.perf_counter()
+    times.append(t1 - t0)
+    all_times.append(t1 - t00)
+times = np.percentile(times, SHOW_SPEED_PERCENTILE)
+all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
+print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
 
-# # exit(0)
+# exit(0)
 
-# #######################################################################################################
+#######################################################################################################
 
 xprint("Decode (CUDAGraph)")
 
