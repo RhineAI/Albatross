@@ -1,6 +1,25 @@
 # Albatross
 efficient RWKV inference engine
 
+## Usage
+
+Reference environment:
+- python 3.13.2
+- torch 2.9.0+cu130
+
+```
+pip install -U flag_gems
+pip install -U triton==3.4.0
+
+# if using conda
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib
+```
+
+Then run the benchmark script:
+```
+python benchmark.py
+```
+
 ## Result @ 250909
 
 Now with batch inference. 7B fp16 bsz 320 = 5848 token/s decoding (const speed & vram because it's RNN) on 5090. I think 10000 token/s is achievable (full fp16 precision).
