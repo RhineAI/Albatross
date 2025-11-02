@@ -20,6 +20,22 @@ Then run the benchmark script:
 python benchmark.py
 ```
 
+## Result @ 251102
+
+```
+Decode (with torch.jit):
+Token/s = 88.2 (forward), 87.85 (full) || Bandwidth = 1222.69 GB/s || 3.309s
+Decode (torch.jit + CUDAGraph):
+Token/s = 105.84 (forward), 104.57 (full) || Bandwidth = 1467.27 GB/s || 2.449s
+
+Decode (with compile):
+Token/s = 109.4 (forward), 108.86 (full) || Bandwidth = 1516.67 GB/s || 5.451s
+Decode (compile + CUDAGraph):
+Token/s = 123.87 (forward), 123.36 (full) || Bandwidth = 1717.27 GB/s || 2.075s
+```
+
+
+
 ## Result @ 250909
 
 Now with batch inference. 7B fp16 bsz 320 = 5848 token/s decoding (const speed & vram because it's RNN) on 5090. I think 10000 token/s is achievable (full fp16 precision).
