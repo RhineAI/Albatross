@@ -4,13 +4,10 @@ efficient RWKV inference engine
 ## Usage
 
 Reference environment:
-- python 3.13.2
-- torch 2.9.0+cu130
+- python 3.13.9
+- torch 2.10.0.dev20251101+cu130
 
 ```
-pip install -U flag_gems
-pip install -U triton==3.4.0
-
 # if using conda
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib
 ```
@@ -18,6 +15,14 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib
 Then run the benchmark script:
 ```
 python benchmark.py
+```
+
+## Result @ 251105
+```
+Decode (with compile):
+Token/s = 118.82 (forward), 118.2 (full) || Bandwidth = 1647.26 GB/s || 9.493s
+Decode (compile + CUDAGraph):
+Token/s = 142.38 (forward), 141.74 (full) || Bandwidth = 1973.9 GB/s || 1.807s
 ```
 
 ## Result @ 251102
