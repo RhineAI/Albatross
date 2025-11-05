@@ -40,11 +40,6 @@ def __nop(ob): return ob
 DTYPE = torch.half
 HEAD_SIZE = 64
 
-############################################### gems ###################################################
-import flag_gems
-
-
-
 ########################################################################################################
 
 from torch.utils.cpp_extension import load, load_inline
@@ -57,9 +52,9 @@ load(name="rwkv7_state_fwd_fp16", sources=[f"{current_path}/cuda/rwkv7_state_fwd
 class SPMV(torch.autograd.Function):
     @staticmethod
     def forward(ctx, vec, mat):
-        assert mat.shape == (16384, 4096)
-        out = torch.zeros((4096,), device=vec.device, dtype=DTYPE, requires_grad=False)
-        torch.ops.rwkv7_state_fwd_fp16.spmv_forward(vec, mat, out)
+        D, C = mat.size()
+        out = torch.zeros((C,), device=vec.device, dtype=DTYPE, requires_grad=False)
+        torch.ops.rwkv7_state_fwd_fp16.spmv_forward(D, C, vec, mat, out)
         return out
 
 @torch.library.custom_op("mylib::SPMV_OP", mutates_args=())
@@ -68,7 +63,8 @@ def SPMV_OP(vec:torch.Tensor, mat:torch.Tensor) -> torch.Tensor:
     return SPMV.apply(vec, mat)
 @SPMV_OP.register_fake
 def _(vec:torch.Tensor, mat:torch.Tensor) -> torch.Tensor:
-    return torch.zeros((4096,), device=vec.device, dtype=DTYPE, requires_grad=False)
+    D, C = mat.size()
+    return torch.zeros((C,), device=vec.device, dtype=DTYPE, requires_grad=False)
 
 # with open("spmv.cu", "r") as f:
 #     cuda_source = f.read()
@@ -391,8 +387,6 @@ def RWKV_x070_TMix_one(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x
     k = k * (1 + (a-1) * k_a)
     kka = kk * a
 
-    # k, kk, kka = torch.ops.flag_gems.rwkv_ka_fusion(k, k_k, a, k_a, H, N)
-
     if layer_id == 0: v_first = v
     else: v = v + (v_first - v) * torch.sigmoid(F.linear(F.linear(xv, v1), v2, bias=v0))
 
@@ -418,8 +412,6 @@ def RWKV_x070_TMix_seq(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x
     kk = F.normalize((k * k_k).view(T,H,N), dim=-1, p=2.0).view(T,H*N)
     k = k * (1 + (a-1) * k_a)
     kka = kk * a
-
-    # k, kk, kka = torch.ops.flag_gems.rwkv_ka_fusion(k, k_k, a, k_a, H, N)
 
     if layer_id == 0: v_first = v
     else: v = v + (v_first - v) * torch.sigmoid(F.linear(F.linear(xv, v1), v2, bias=v0))
