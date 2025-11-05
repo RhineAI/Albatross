@@ -25,7 +25,7 @@ args.head_size = 64
 #
 # model download: https://huggingface.co/BlinkDL/rwkv7-g1
 #
-# args.MODEL_NAME = "/models/rwkv7-g0a-7.2b-20250829-ctx4096"
+args.MODEL_NAME = "/models/rwkv7-g0a-7.2b-20250829-ctx4096"
 # args.MODEL_NAME = "/models/rwkv7-g1a3-1.5b-20251015-ctx8192"
 # args.MODEL_NAME = "/models/rwkv7-g0a3-13.3b-20251031-ctx4096"
 # args.MODEL_NAME = "/models/rwkv7-g1a3-2.9b-20251103-ctx8192"
