@@ -141,7 +141,7 @@ print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full
 
 # exit(0)
 
-#######################################################################################################
+# #######################################################################################################
 
 xprint("Decode (CUDAGraph)")
 
@@ -210,108 +210,108 @@ print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full
 exit(0)
 #######################################################################################################
 
-xprint("Decode (batch)")
+# xprint("Decode (batch)")
 
-for BSZ in [960, 960, 1024, 1024]:
-# for BSZ in [512, 512, 512, 512]:
-    torch.cuda.empty_cache()
-    gc.collect()
-    torch.cuda.empty_cache()
-    gc.collect()
+# for BSZ in [128, 128, 160, 160, 192, 192]:
+# # for BSZ in [512, 512, 512, 512]:
+#     torch.cuda.empty_cache()
+#     gc.collect()
+#     torch.cuda.empty_cache()
+#     gc.collect()
 
-    state = model.generate_zero_state(BSZ)
+#     state = model.generate_zero_state(BSZ)
 
-    time.sleep(1)
-    if BSZ == 2:
-        prompts = ["The apple can be", "The cat can't be"]
-    else:
-        prompts = ["The apple can be" for _ in range(BSZ)]
-    nnn = len(prompts)
-    tokens = [tokenizer.encode(prompt) for prompt in prompts]
-    LENGTH_PER_TRIAL = 32
-    # TEMPERATURE = 1.0
-    # TOP_P = 0.0
+#     time.sleep(1)
+#     if BSZ == 2:
+#         prompts = ["The apple can be", "The cat can't be"]
+#     else:
+#         prompts = ["The apple can be" for _ in range(BSZ)]
+#     nnn = len(prompts)
+#     tokens = [tokenizer.encode(prompt) for prompt in prompts]
+#     LENGTH_PER_TRIAL = 32
+#     # TEMPERATURE = 1.0
+#     # TOP_P = 0.0
 
-    if BSZ == 2:
-        print('wait', end='')
-    all_tokens = []
-    out = model.forward_batch(tokens, state)
+#     if BSZ == 2:
+#         print('wait', end='')
+#     all_tokens = []
+#     out = model.forward_batch(tokens, state)
 
-    times = []
-    all_times = []
-    t000 = time.perf_counter()
-    for i in range(LENGTH_PER_TRIAL):
-        t00 = time.perf_counter()
-        token = sampler_simple_batch(out, noise=0).tolist()
-        all_tokens += [token]
-        if BSZ == 2:
-            print('.', end='', flush=True)
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        out = model.forward_batch(token, state)
-        torch.cuda.synchronize()
-        t1 = time.perf_counter()
-        times.append(t1 - t0)
-        all_times.append(t1 - t00)
+#     times = []
+#     all_times = []
+#     t000 = time.perf_counter()
+#     for i in range(LENGTH_PER_TRIAL):
+#         t00 = time.perf_counter()
+#         token = sampler_simple_batch(out, noise=0).tolist()
+#         all_tokens += [token]
+#         if BSZ == 2:
+#             print('.', end='', flush=True)
+#         torch.cuda.synchronize()
+#         t0 = time.perf_counter()
+#         out = model.forward_batch(token, state)
+#         torch.cuda.synchronize()
+#         t1 = time.perf_counter()
+#         times.append(t1 - t0)
+#         all_times.append(t1 - t00)
 
-    times = np.percentile(times, SHOW_SPEED_PERCENTILE)
-    all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
+#     times = np.percentile(times, SHOW_SPEED_PERCENTILE)
+#     all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
 
-    del state
-    torch.cuda.empty_cache()
-    gc.collect()
-    torch.cuda.empty_cache()
-    gc.collect()
+#     del state
+#     torch.cuda.empty_cache()
+#     gc.collect()
+#     torch.cuda.empty_cache()
+#     gc.collect()
 
-    if BSZ == 2:
-        print('\n')
-        for n in range(nnn):
-            print(prompts[n], end='')
-            aaa_tokens = []
-            for i in range(LENGTH_PER_TRIAL):
-                aaa_tokens += all_tokens[i][n]
-            print(tokenizer.decode(aaa_tokens, utf8_errors="ignore"))
-            print('#'*80)
+#     if BSZ == 2:
+#         print('\n')
+#         for n in range(nnn):
+#             print(prompts[n], end='')
+#             aaa_tokens = []
+#             for i in range(LENGTH_PER_TRIAL):
+#                 aaa_tokens += all_tokens[i][n]
+#             print(tokenizer.decode(aaa_tokens, utf8_errors="ignore"))
+#             print('#'*80)
 
-    print(f'Bsz {BSZ} || Token/s = {round(nnn/times,2)} (forward), {round(nnn/all_times,2)} (full) || {round(time.perf_counter()-t000,3)}s')
+#     print(f'Bsz {BSZ} || Token/s = {round(nnn/times,2)} (forward), {round(nnn/all_times,2)} (full) || {round(time.perf_counter()-t000,3)}s')
 
 #######################################################################################################
 
-xprint("Prefill")
+# xprint("Prefill")
 
-raw = open("eval/calibration_data_v5_rc.txt").read()
-tokens = tokenizer.encode(raw)
-# print(len(tokens))
+# raw = open("eval/calibration_data_v5_rc.txt").read()
+# tokens = tokenizer.encode(raw)
+# # print(len(tokens))
 
-for stage in range(8, 12+1):
-    CTX_LEN = 2**stage
-    loss = 0
-    a = 0
-    cnt = 0
+# for stage in range(8, 12+1):
+#     CTX_LEN = 2**stage
+#     loss = 0
+#     a = 0
+#     cnt = 0
     
-    times = []
-    while a+CTX_LEN < len(tokens):
-        src = tokens[a:a+CTX_LEN]
+#     times = []
+#     while a+CTX_LEN < len(tokens):
+#         src = tokens[a:a+CTX_LEN]
 
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        prob = model.forward(src[:-1], model.generate_zero_state(0), full_output=True)
-        torch.cuda.synchronize()
-        t1 = time.perf_counter()
-        times.append(t1 - t0)
+#         torch.cuda.synchronize()
+#         t0 = time.perf_counter()
+#         prob = model.forward(src[:-1], model.generate_zero_state(0), full_output=True)
+#         torch.cuda.synchronize()
+#         t1 = time.perf_counter()
+#         times.append(t1 - t0)
             
-        prob = F.softmax(prob.float(), dim=-1)
-        for j in range(CTX_LEN-1):
-            loss -= math.log(prob[j][src[j+1]])
-            cnt += 1
-        a += CTX_LEN
+#         prob = F.softmax(prob.float(), dim=-1)
+#         for j in range(CTX_LEN-1):
+#             loss -= math.log(prob[j][src[j+1]])
+#             cnt += 1
+#         a += CTX_LEN
 
-    times = np.percentile(times, SHOW_SPEED_PERCENTILE)
-    print(f'CTX_LEN {CTX_LEN} : avg loss {round(loss/cnt,4)} || prefill {round((CTX_LEN-1)/times)} token/s = {round((CTX_LEN-1)/times * active_params * 2/1e12, 2)} TFLOPS')
+#     times = np.percentile(times, SHOW_SPEED_PERCENTILE)
+#     print(f'CTX_LEN {CTX_LEN} : avg loss {round(loss/cnt,4)} || prefill {round((CTX_LEN-1)/times)} token/s = {round((CTX_LEN-1)/times * active_params * 2/1e12, 2)} TFLOPS')
 
-#######################################################################################################
+# #######################################################################################################
 
-xprint("Arithmetic")
+# xprint("Arithmetic")
 
 def eval_qa(todo, print_interval, pad_eod = True, loss_mode = False):
     xsum = 0
@@ -345,70 +345,70 @@ def eval_qa(todo, print_interval, pad_eod = True, loss_mode = False):
             else:
                 print(xcnt, 'ppl', round(math.exp(-xsum / xcnt), 2), 'acc', round(xacc/xcnt*100, 1))
 
-x1, x2 = 1, 2
-magic = (5**(0.5)-1)/2
-for stage in range(2,7+1):
-    todo = []
-    NUMBER_LIMIT = 10**stage
-    for i in range(200):
-        x1 += i
-        x2 += i*i
-        s1 = int(magic * x1 * NUMBER_LIMIT) % NUMBER_LIMIT
-        s2 = int(magic * x2 * NUMBER_LIMIT) % NUMBER_LIMIT
-        # todo.append([f'\nAssistant: {s1}+{s2}=',str(s1+s2)])
-        # todo.append([f'\nAssistant: {s1}-{s2}=',str(s1-s2)])
-        todo.append([f'\nA: 123+321=444\n{s1}+{s2}=',str(s1+s2)]) # better prompt
-        todo.append([f'\nA: 123-321=-198\n{s1}-{s2}=',str(s1-s2)]) # better prompt
-    # print(todo)
-    print(f"Len {stage} : ", end="")
-    eval_qa(todo, 99999999, pad_eod=False, loss_mode=True)
+# x1, x2 = 1, 2
+# magic = (5**(0.5)-1)/2
+# for stage in range(2,7+1):
+#     todo = []
+#     NUMBER_LIMIT = 10**stage
+#     for i in range(200):
+#         x1 += i
+#         x2 += i*i
+#         s1 = int(magic * x1 * NUMBER_LIMIT) % NUMBER_LIMIT
+#         s2 = int(magic * x2 * NUMBER_LIMIT) % NUMBER_LIMIT
+#         # todo.append([f'\nAssistant: {s1}+{s2}=',str(s1+s2)])
+#         # todo.append([f'\nAssistant: {s1}-{s2}=',str(s1-s2)])
+#         todo.append([f'\nA: 123+321=444\n{s1}+{s2}=',str(s1+s2)]) # better prompt
+#         todo.append([f'\nA: 123-321=-198\n{s1}-{s2}=',str(s1-s2)]) # better prompt
+#     # print(todo)
+#     print(f"Len {stage} : ", end="")
+#     eval_qa(todo, 99999999, pad_eod=False, loss_mode=True)
 
-#######################################################################################################
+# #######################################################################################################
 
-xprint("Repeat")
+# xprint("Repeat")
 
-class LCG:
-    def __init__(self, seed=42):
-        self.m = 2**32  # Modulus
-        self.a = 1664525  # Multiplier
-        self.c = 1013904223  # Increment
-        self.state = seed
-    def _generate(self):
-        self.state = (self.a * self.state + self.c) % self.m
-        return self.state
-    def randint(self, min_val, max_val):
-        if min_val > max_val:
-            raise ValueError("min_val cannot be greater than max_val")
-        range_size = max_val - min_val + 1
-        return min_val + self._generate() % range_size
-lcg = LCG()
-def generate_random_number_string(n, generator):
-    if not isinstance(n, int) or n <= 0:
-        raise ValueError("Number of digits N must be a positive integer.")
-    if n == 1:
-        return str(generator.randint(0, 9))
-    first_digit = str(generator.randint(1, 9))
-    remaining_digits = [str(generator.randint(0, 9)) for _ in range(n - 1)]
-    return first_digit + "".join(remaining_digits)
-def generate_random_string(n, generator):
-    if not isinstance(n, int) or n <= 0:
-        raise ValueError("Number of digits N must be a positive integer.")
-    ccccc = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
-    chars = [ccccc[generator.randint(0, len(ccccc)-1)] for _ in range(n)]
-    return "".join(chars)
+# class LCG:
+#     def __init__(self, seed=42):
+#         self.m = 2**32  # Modulus
+#         self.a = 1664525  # Multiplier
+#         self.c = 1013904223  # Increment
+#         self.state = seed
+#     def _generate(self):
+#         self.state = (self.a * self.state + self.c) % self.m
+#         return self.state
+#     def randint(self, min_val, max_val):
+#         if min_val > max_val:
+#             raise ValueError("min_val cannot be greater than max_val")
+#         range_size = max_val - min_val + 1
+#         return min_val + self._generate() % range_size
+# lcg = LCG()
+# def generate_random_number_string(n, generator):
+#     if not isinstance(n, int) or n <= 0:
+#         raise ValueError("Number of digits N must be a positive integer.")
+#     if n == 1:
+#         return str(generator.randint(0, 9))
+#     first_digit = str(generator.randint(1, 9))
+#     remaining_digits = [str(generator.randint(0, 9)) for _ in range(n - 1)]
+#     return first_digit + "".join(remaining_digits)
+# def generate_random_string(n, generator):
+#     if not isinstance(n, int) or n <= 0:
+#         raise ValueError("Number of digits N must be a positive integer.")
+#     ccccc = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+#     chars = [ccccc[generator.randint(0, len(ccccc)-1)] for _ in range(n)]
+#     return "".join(chars)
 
-for stage in range(4):
-    todo = []
-    l_max = 0
-    l_min = 1e10
-    for i in range(100):
-        l = round(pow(2,(stage+i/100)) * 100)
-        l_min = min(l, l_min)
-        l_max = max(l, l_max)
-        s = generate_random_string(l, lcg)
-        todo.append([f'\nYou must remember the secret is {s}. Repeat: the secret is', f' {s}'])
-    print(f"Len {l_min} to {l_max} : ", end="")
-    eval_qa(todo, 99999999, loss_mode=True)
+# for stage in range(4):
+#     todo = []
+#     l_max = 0
+#     l_min = 1e10
+#     for i in range(100):
+#         l = round(pow(2,(stage+i/100)) * 100)
+#         l_min = min(l, l_min)
+#         l_max = max(l, l_max)
+#         s = generate_random_string(l, lcg)
+#         todo.append([f'\nYou must remember the secret is {s}. Repeat: the secret is', f' {s}'])
+#     print(f"Len {l_min} to {l_max} : ", end="")
+#     eval_qa(todo, 99999999, loss_mode=True)
 
 #######################################################################################################
 

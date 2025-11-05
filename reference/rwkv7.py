@@ -9,15 +9,21 @@ import os
 current_path = os.path.dirname(os.path.abspath(__file__))
 
 import torch
+import torch.library
+from torch.library import register_fake
+torch.set_grad_enabled(False)
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.matmul.allow_tf32 = True
+
 # torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 # torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
 torch._C._jit_set_autocast_mode(False)
 
 import torch.nn as nn
 from torch.nn import functional as F
+
+from torch.library import Library, impl
 
 # MyModule = torch.jit.ScriptModule
 # MyFunction = torch.jit.script_method
@@ -32,18 +38,69 @@ def __nop(ob): return ob
 # MyDisable = __nop
 
 DTYPE = torch.half
+HEAD_SIZE = 64
 
 ############################################### gems ###################################################
 import flag_gems
 
 
+
 ########################################################################################################
 
-from torch.utils.cpp_extension import load
-HEAD_SIZE = 64
+from torch.utils.cpp_extension import load, load_inline
+
 
 load(name="rwkv7_state_fwd_fp16", sources=[f"{current_path}/cuda/rwkv7_state_fwd_fp16.cpp", f"{current_path}/cuda/rwkv7_state_fwd_fp16.cu"], is_python_module=False,
                     verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}"] + (["-Xptxas -O3"] if os.name != "nt" else []))
+
+
+class SPMV(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, vec, mat):
+        assert mat.shape == (16384, 4096)
+        out = torch.zeros((4096,), device=vec.device, dtype=DTYPE, requires_grad=False)
+        torch.ops.rwkv7_state_fwd_fp16.spmv_forward(vec, mat, out)
+        return out
+
+@torch.library.custom_op("mylib::SPMV_OP", mutates_args=())
+# @MyDisable
+def SPMV_OP(vec:torch.Tensor, mat:torch.Tensor) -> torch.Tensor:
+    return SPMV.apply(vec, mat)
+@SPMV_OP.register_fake
+def _(vec:torch.Tensor, mat:torch.Tensor) -> torch.Tensor:
+    return torch.zeros((4096,), device=vec.device, dtype=DTYPE, requires_grad=False)
+
+# with open("spmv.cu", "r") as f:
+#     cuda_source = f.read()
+
+# cpp_source = """
+# #undef __CUDA_NO_HALF_OPERATORS__
+# #define TORCH_USE_CUDA_DSA 1
+# #include <torch/extension.h>
+# void spmv_forward(
+#     torch::Tensor vec,
+#     torch::Tensor mat,
+#     torch::Tensor out
+# );
+# """
+
+# # 编译并加载（自动缓存，只编译一次）
+# spmv_cu = load_inline(
+#     name="spmv_cu",
+#     cpp_sources=cpp_source,
+#     cuda_sources=cuda_source,
+#     functions=["spmv_forward"],
+#     extra_cuda_cflags=["-O3", "-res-usage", "--use_fast_math", "--extra-device-vectorization", "-Xptxas -O3"],
+#     verbose=True,
+# )
+
+# def SPMV_OP(vec:torch.Tensor, mat:torch.Tensor) -> torch.Tensor:
+#     out = torch.zeros((4096,), device=vec.device, dtype=DTYPE, requires_grad=False, memory_format=torch.contiguous_format)
+#     spmv_cu.spmv_forward(vec_full, mat, cu_out)
+
+
+
+
 class WKV_7_ONE(torch.autograd.Function):
     @staticmethod
     def forward(ctx, state, r, w, k, v, a, b, elapsed_t):
@@ -53,9 +110,14 @@ class WKV_7_ONE(torch.autograd.Function):
             y = torch.empty((C,), device=k.device, dtype=DTYPE, requires_grad=False, memory_format=torch.contiguous_format)
             torch.ops.rwkv7_state_fwd_fp16.forward_one(1, C, H, state, r, w, k, v, a, b, y, elapsed_t)
             return y
-@MyDisable
-def RWKV7_ONE_OP(state, r, w, k, v, a, b, elapsed_t):
+
+@torch.library.custom_op("mylib::RWKV7_ONE_OP", mutates_args=())
+# @MyDisable
+def RWKV7_ONE_OP(state:torch.Tensor, r:torch.Tensor, w:torch.Tensor, k:torch.Tensor, v:torch.Tensor, a:torch.Tensor, b:torch.Tensor, elapsed_t:torch.Tensor) -> torch.Tensor:
     return WKV_7_ONE.apply(state, r, w, k, v, a, b, elapsed_t)
+@RWKV7_ONE_OP.register_fake
+def _(state:torch.Tensor, r:torch.Tensor, w:torch.Tensor, k:torch.Tensor, v:torch.Tensor, a:torch.Tensor, b:torch.Tensor, elapsed_t:torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(r)
 
 class WKV_7_SEQ(torch.autograd.Function):
     @staticmethod
@@ -67,10 +129,13 @@ class WKV_7_SEQ(torch.autograd.Function):
             torch.ops.rwkv7_state_fwd_fp16.forward_seq(1, T, C, H, state, r, w, k, v, a, b, y, elapsed_t)
             return y
 
-@MyDisable
-def RWKV7_SEQ_OP(state, r, w, k, v, a, b, elapsed_t):
+@torch.library.custom_op("mylib::RWKV7_SEQ_OP", mutates_args=())
+# @MyDisable
+def RWKV7_SEQ_OP(state:torch.Tensor, r:torch.Tensor, w:torch.Tensor, k:torch.Tensor, v:torch.Tensor, a:torch.Tensor, b:torch.Tensor, elapsed_t:torch.Tensor) -> torch.Tensor:
     return WKV_7_SEQ.apply(state, r, w, k, v, a, b, elapsed_t)
-
+@RWKV7_SEQ_OP.register_fake
+def _(state:torch.Tensor, r:torch.Tensor, w:torch.Tensor, k:torch.Tensor, v:torch.Tensor, a:torch.Tensor, b:torch.Tensor, elapsed_t:torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(r)
 
 class WKV_7_BATCH(torch.autograd.Function):
     @staticmethod
@@ -81,9 +146,15 @@ class WKV_7_BATCH(torch.autograd.Function):
             y = torch.empty((B, C), device=k.device, dtype=DTYPE, requires_grad=False, memory_format=torch.contiguous_format)
             torch.ops.rwkv7_state_fwd_fp16.forward_one(B, C, H, state, r, w, k, v, a, b, y, elapsed_t)
             return y
-@MyDisable
-def RWKV7_ONE_BATCH_OP(state, r, w, k, v, a, b, elapsed_t):
+
+@torch.library.custom_op("mylib::RWKV7_ONE_BATCH_OP", mutates_args=())
+# @MyDisable
+def RWKV7_ONE_BATCH_OP(state:torch.Tensor, r:torch.Tensor, w:torch.Tensor, k:torch.Tensor, v:torch.Tensor, a:torch.Tensor, b:torch.Tensor, elapsed_t:torch.Tensor) -> torch.Tensor:
     return WKV_7_BATCH.apply(state, r, w, k, v, a, b, elapsed_t)
+@RWKV7_ONE_BATCH_OP.register_fake
+def _(state:torch.Tensor, r:torch.Tensor, w:torch.Tensor, k:torch.Tensor, v:torch.Tensor, a:torch.Tensor, b:torch.Tensor, elapsed_t:torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(r)
+
 
 class WKV_7_SEQ_BATCH(torch.autograd.Function):
     @staticmethod
@@ -95,9 +166,13 @@ class WKV_7_SEQ_BATCH(torch.autograd.Function):
             torch.ops.rwkv7_state_fwd_fp16.forward_seq(B, T, C, H, state, r, w, k, v, a, b, y, elapsed_t)
             return y
 
-@MyDisable
-def RWKV7_BATCH_OP(state, r, w, k, v, a, b, elapsed_t):
+@torch.library.custom_op("mylib::RWKV7_BATCH_OP", mutates_args=())
+# @MyDisable
+def RWKV7_BATCH_OP(state:torch.Tensor, r:torch.Tensor, w:torch.Tensor, k:torch.Tensor, v:torch.Tensor, a:torch.Tensor, b:torch.Tensor, elapsed_t:torch.Tensor) -> torch.Tensor:
     return WKV_7_SEQ_BATCH.apply(state, r, w, k, v, a, b, elapsed_t)
+@RWKV7_BATCH_OP.register_fake
+def _(state:torch.Tensor, r:torch.Tensor, w:torch.Tensor, k:torch.Tensor, v:torch.Tensor, a:torch.Tensor, b:torch.Tensor, elapsed_t:torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(r)
 
 ########################################################################################################
 
@@ -119,12 +194,14 @@ class RWKV_x070(MyModule):
         keys = list(z.keys())
         max_layer = -1
         for k in keys:
+            kk = k.split('.')
+            # if kk[0] == 'blocks' and int(kk[1]) >= 10:
+            #     continue
             if 'att.g1' in k or 'att.g2' in k or 'att.a1' in k or 'att.a2' in k or 'att.w1' in k or 'att.w2' in k or 'att.v1' in k or 'att.v2' in k or 'ffn.value.weight' in k:
                 z[k] = z[k].t()
             z[k] = z[k].squeeze().to(dtype=DTYPE, device="cuda")
             if k.endswith('att.r_k'): z[k] = z[k].flatten()
             z[k] = z[k].contiguous()
-            kk = k.split('.')
             if kk[0] == 'blocks':
                 max_layer = max(max_layer, int(kk[1]))
         args.n_layer = max_layer + 1
@@ -394,8 +471,10 @@ def RWKV_x070_CMix_one(x, x_prev, x_k, K_, V_):
     x_prev[1] = x
     k = x + xx * x_k
     k = torch.relu(F.linear(k, K_)) ** 2
-    kv = torch.ops.flag_gems.rwkv_mm_sparsity(k, V_)
-    return kv # F.linear(k, V_)
+    # kv1 = torch.ops.flag_gems.rwkv_mm_sparsity(k, V_)
+    # kv2 = SPMV_OP(k, V_)
+    # kv3 = k @ V_
+    return SPMV_OP(k, V_)
 
 @MyStatic
 def RWKV_x070_CMix_seq(x, x_prev, x_k, K_, V_):
