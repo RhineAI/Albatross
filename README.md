@@ -7,11 +7,6 @@ Reference environment:
 - python 3.13.9
 - torch 2.10.0.dev20251101+cu130
 
-```
-# if using conda
-export LD_LIBRARY_PATH=$CONDA_PREFIX/lib
-```
-
 Then run the benchmark script:
 ```
 python benchmark.py
@@ -145,3 +140,106 @@ Performance comparison between FP16 and FP32 implementations is shown below:
 
 # Result @ 251008
 Now over 10000 tokens/s on RTX5090 (bsz960). Special thanks to [@blealtan](https://github.com/blealtan) for implementing swizzling for coalesced state r/w. There is still plenty of room for optimization.
+
+# CUDA Functions for Sparse-Vector-Dense-Matrix Multiplication
+Now with a even faster kernel for Sparse-Vector-Dense-Matrix Multiplication. 
+
+> Mechanism: only rows `i` where `vector[i] != 0` are being read. This reduces down global memory access significantly.
+
+Estimated around 18us on dimension 16384x4096, this kernel outperforms naive matrix-vector multiplication.
+
+We sincerely thank [FlagOpen/FlagGems](https://github.com/FlagOpen/FlagGems) for first implementing this idea, and [tile-ai/tilelang](https://github.com/tile-ai/tilelang) for code templates for asynchronous copy operations.
+
+```cpp
+#define BLOCKDIM 128
+#define MAXNPERBLOCK 64
+__global__ void __launch_bounds__(BLOCKDIM, 1) spvecmatmul_noindices(
+    const int C,
+    const half* __restrict__ vec,
+    const half* __restrict__ mat,
+    half* __restrict__ out
+){
+    __shared__ __align__(256) half mat_row_smem[2][2*BLOCKDIM];
+    __shared__ __align__(256) half vec_slice[MAXNPERBLOCK];
+    __shared__ __align__(256) int nnz_ids[MAXNPERBLOCK];
+    __shared__ int nnz_count;
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int t = threadIdx.x;
+    const int start_pos = bx * MAXNPERBLOCK;
+
+    if (t < 32){
+        *(half2*)(vec_slice + t*2) = *(const half2*)(vec + start_pos + t*2);
+    }
+    __syncthreads();
+    if (t == 0){
+        int cnt = 0;
+        #pragma unroll
+        for (int i=0; i<8; ++i) {
+            common128 z;
+            z.I = ((const int4*)vec_slice)[i];
+            #pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                unsigned short bits = __half_as_ushort(z.h[j]);
+                if (bits != 0x0000 && bits != 0x8000) {
+                    int idx = i * 8 + j;
+                    nnz_ids[cnt] = idx;
+                    cnt++;
+                }
+            }
+        }
+        nnz_count = cnt;
+    }
+    __syncthreads();
+
+    half2 out_frag;
+    *(int*)(&out_frag) = 0;
+    // init
+    #pragma unroll
+    for(int i = 0; i < 2; i++){
+        if (i < nnz_count){
+            int actual_pos = start_pos + nnz_ids[i];
+            cp_async_gs_conditional<4>(mat_row_smem[i%2] + t*2, mat + actual_pos * C + by * (2*BLOCKDIM) + t*2, true);
+            cp_async_commit();
+        }
+    }
+    // main for
+    for(int i = 0; i < nnz_count-2; i++){
+        // take data
+        cp_async_wait<1>();
+        __syncthreads();
+
+        half2 mat_row_frag = *(half2*) (mat_row_smem[i%2] + t*2);
+        half vec_value = vec_slice[nnz_ids[i]];
+
+        // store
+        int actual_pos = start_pos + nnz_ids[i+2];
+        cp_async_gs_conditional<4>(mat_row_smem[i%2] + t*2, mat + actual_pos * C + by * (2*BLOCKDIM) + t*2, true);
+        cp_async_commit();
+
+        // compute
+        out_frag = __hfma2(__half2half2(vec_value), mat_row_frag, out_frag);
+    }
+
+    // end
+    if (nnz_count >= 2){
+        cp_async_wait<1>();
+        __syncthreads();
+
+        half2 mat_row_frag = *(half2*) (mat_row_smem[nnz_count%2] + t*2);
+        half vec_value = vec_slice[nnz_ids[nnz_count - 2]];
+
+        out_frag = __hfma2(__half2half2(vec_value), mat_row_frag, out_frag);
+    }
+    if (nnz_count >= 1){
+        cp_async_wait<0>();
+        __syncthreads();
+
+        half2 mat_row_frag = *(half2*) (mat_row_smem[(nnz_count+1)%2] + t*2);
+        half vec_value = vec_slice[nnz_ids[nnz_count - 1]];
+
+        out_frag = __hfma2(__half2half2(vec_value), mat_row_frag, out_frag);
+    }
+    atomicAdd((half2*)(out + by*(2*BLOCKDIM) + t*2), out_frag);
+}
+```
