@@ -184,7 +184,7 @@ __device__ __forceinline__ void cp_async_gs_conditional(void const *const smem_a
                                        void const *const global_ptr, bool cond) {
     static_assert(N == 16 || N == 8 || N == 4);
     int bytes = cond ? N : 0;
-    unsigned int addr = (unsigned int)(smem_addr);
+    unsigned int addr = __cvta_generic_to_shared(smem_addr);
     if constexpr (N == 16) {
         asm volatile(
             #if ENABLE_L2_PREFETCH
