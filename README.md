@@ -4,13 +4,22 @@ efficient RWKV inference engine
 ## Usage
 
 Reference environment:
-- python 3.13.9
-- torch 2.10.0.dev20251101+cu130
+- python 3.12.12
+- torch 2.8.0+cu130
 
 Then run the benchmark script:
 ```
 python benchmark.py
 ```
+
+## result @ 251111, discrete state
+```
+Decode (with compile):
+Token/s = 122.81 (forward), 122.13 (full) || Bandwidth = 1702.55 GB/s || 9.072s
+Decode (compile + CUDAGraph):
+Token/s = 144.82 (forward), 144.05 (full) || Bandwidth = 2007.68 GB/s || 1.778s
+```
+
 
 ## Result @ 251105
 ```
