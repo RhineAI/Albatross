@@ -143,7 +143,7 @@ print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full
 
 # exit(0)
 
-# #######################################################################################################
+# # #######################################################################################################
 
 xprint("Decode (CUDAGraph)")
 
@@ -163,10 +163,11 @@ token = sampler_simple(out, noise=0).item()
 x = model.z['emb.weight'][token]
 
 static_input = torch.empty_like(x, device="cuda")
-static_state = [None, None, None]
-static_state[0] = torch.empty_like(state[0], device="cuda")
-static_state[1] = torch.empty_like(state[1], device="cuda")
-static_state[2] = torch.empty_like(state[2], device="cuda")
+static_state = copy.deepcopy(state)
+# static_state = [None, None, None]
+# static_state[0] = torch.empty_like(state[0], device="cuda")
+# static_state[1] = torch.empty_like(state[1], device="cuda")
+# static_state[2] = torch.empty_like(state[2], device="cuda")
 static_output = torch.empty_like(out, device="cuda")
 
 static_output = model.forward(static_input, static_state)
@@ -176,9 +177,8 @@ with torch.cuda.graph(g):
     static_output = model.forward(static_input, static_state)
 
 static_input.copy_(x)
-static_state[0].copy_(state[0])
-static_state[1].copy_(state[1])
-static_state[2].copy_(state[2])
+for i in range(len(state)):
+    static_state[i].copy_(state[i])
 static_output.copy_(out)
 
 times = []
@@ -195,8 +195,7 @@ for i in range(0, LENGTH_PER_TRIAL):
     except:
         pass
 
-    x = model.z['emb.weight'][token]
-    static_input.copy_(x)
+    static_input.copy_(model.z['emb.weight'][token])
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -212,70 +211,70 @@ print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full
 exit(0)
 #######################################################################################################
 
-# xprint("Decode (batch)")
+xprint("Decode (batch)")
 
-# for BSZ in [128, 128, 160, 160, 192, 192]:
-# # for BSZ in [512, 512, 512, 512]:
-#     torch.cuda.empty_cache()
-#     gc.collect()
-#     torch.cuda.empty_cache()
-#     gc.collect()
+for BSZ in [320, 320, 960, 960]:
+# for BSZ in [512, 512, 512, 512]:
+    torch.cuda.empty_cache()
+    gc.collect()
+    torch.cuda.empty_cache()
+    gc.collect()
 
-#     state = model.generate_zero_state(BSZ)
+    state = model.generate_zero_state(BSZ)
 
-#     time.sleep(1)
-#     if BSZ == 2:
-#         prompts = ["The apple can be", "The cat can't be"]
-#     else:
-#         prompts = ["The apple can be" for _ in range(BSZ)]
-#     nnn = len(prompts)
-#     tokens = [tokenizer.encode(prompt) for prompt in prompts]
-#     LENGTH_PER_TRIAL = 32
-#     # TEMPERATURE = 1.0
-#     # TOP_P = 0.0
+    time.sleep(1)
+    if BSZ == 2:
+        prompts = ["The apple can be", "The cat can't be"]
+    else:
+        prompts = ["The apple can be" for _ in range(BSZ)]
+    nnn = len(prompts)
+    tokens = [tokenizer.encode(prompt) for prompt in prompts]
+    LENGTH_PER_TRIAL = 32
+    # TEMPERATURE = 1.0
+    # TOP_P = 0.0
 
-#     if BSZ == 2:
-#         print('wait', end='')
-#     all_tokens = []
-#     out = model.forward_batch(tokens, state)
+    if BSZ == 2:
+        print('wait', end='')
+    all_tokens = []
+    out = model.forward_batch(tokens, state)
 
-#     times = []
-#     all_times = []
-#     t000 = time.perf_counter()
-#     for i in range(LENGTH_PER_TRIAL):
-#         t00 = time.perf_counter()
-#         token = sampler_simple_batch(out, noise=0).tolist()
-#         all_tokens += [token]
-#         if BSZ == 2:
-#             print('.', end='', flush=True)
-#         torch.cuda.synchronize()
-#         t0 = time.perf_counter()
-#         out = model.forward_batch(token, state)
-#         torch.cuda.synchronize()
-#         t1 = time.perf_counter()
-#         times.append(t1 - t0)
-#         all_times.append(t1 - t00)
+    times = []
+    all_times = []
+    t000 = time.perf_counter()
+    for i in range(LENGTH_PER_TRIAL):
+        t00 = time.perf_counter()
+        token = sampler_simple_batch(out, noise=0).tolist()
+        all_tokens += [token]
+        if BSZ == 2:
+            print('.', end='', flush=True)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        out = model.forward_batch(token, state)
+        torch.cuda.synchronize()
+        t1 = time.perf_counter()
+        times.append(t1 - t0)
+        all_times.append(t1 - t00)
 
-#     times = np.percentile(times, SHOW_SPEED_PERCENTILE)
-#     all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
+    times = np.percentile(times, SHOW_SPEED_PERCENTILE)
+    all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
 
-#     del state
-#     torch.cuda.empty_cache()
-#     gc.collect()
-#     torch.cuda.empty_cache()
-#     gc.collect()
+    del state
+    torch.cuda.empty_cache()
+    gc.collect()
+    torch.cuda.empty_cache()
+    gc.collect()
 
-#     if BSZ == 2:
-#         print('\n')
-#         for n in range(nnn):
-#             print(prompts[n], end='')
-#             aaa_tokens = []
-#             for i in range(LENGTH_PER_TRIAL):
-#                 aaa_tokens += all_tokens[i][n]
-#             print(tokenizer.decode(aaa_tokens, utf8_errors="ignore"))
-#             print('#'*80)
+    if BSZ == 2:
+        print('\n')
+        for n in range(nnn):
+            print(prompts[n], end='')
+            aaa_tokens = []
+            for i in range(LENGTH_PER_TRIAL):
+                aaa_tokens += all_tokens[i][n]
+            print(tokenizer.decode(aaa_tokens, utf8_errors="ignore"))
+            print('#'*80)
 
-#     print(f'Bsz {BSZ} || Token/s = {round(nnn/times,2)} (forward), {round(nnn/all_times,2)} (full) || {round(time.perf_counter()-t000,3)}s')
+    print(f'Bsz {BSZ} || Token/s = {round(nnn/times,2)} (forward), {round(nnn/all_times,2)} (full) || {round(time.perf_counter()-t000,3)}s')
 
 #######################################################################################################
 

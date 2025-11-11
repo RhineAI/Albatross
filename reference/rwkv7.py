@@ -31,7 +31,7 @@ from torch.library import Library, impl
 MyModule = nn.Module
 MyFunction = torch.compile(mode='max-autotune-no-cudagraphs')
 MyStatic = torch.compile(mode='max-autotune-no-cudagraphs')
-MyDisable = torch.compiler.disable
+# MyDisable = torch.compiler.disable
 def __nop(ob): return ob
 # MyFunction = __nop
 # MyStatic = __nop
@@ -172,6 +172,55 @@ def _(state:torch.Tensor, r:torch.Tensor, w:torch.Tensor, k:torch.Tensor, v:torc
 
 ########################################################################################################
 
+# class STATEone(MyModule):
+#     def __init__(self, n_embd: int, head_size: int, bsz: int=0):
+#         super().__init__()
+#         self.n_embd = n_embd
+#         self.head_size = head_size
+#         self.bsz = bsz
+#         if bsz >= 1:
+#             self.att = torch.zeros((bsz, self.n_embd), dtype=DTYPE, requires_grad=False, device="cuda")
+#             self.wkv = torch.zeros((bsz, self.n_embd // self.head_size, self.head_size, self.head_size), dtype=torch.half, requires_grad=False, device="cuda")
+#             self.ffn = torch.zeros((bsz, self.n_embd), dtype=DTYPE, requires_grad=False, device="cuda")
+#         else:
+#             self.att = torch.zeros((self.n_embd,), dtype=DTYPE, requires_grad=False, device="cuda")
+#             self.wkv = torch.zeros((self.n_embd // self.head_size, self.head_size, self.head_size), dtype=torch.half, requires_grad=False, device="cuda")
+#             self.ffn = torch.zeros((self.n_embd,), dtype=DTYPE, requires_grad=False, device="cuda")
+#         # self.generate_zero_state(bsz)
+#     def generate_zero_state(self, bsz: int):
+#         if bsz >= 1:
+#             self.att = torch.zeros((bsz, self.n_embd), dtype=DTYPE, requires_grad=False, device="cuda")
+#             self.wkv = torch.zeros((bsz, self.n_embd // self.head_size, self.head_size, self.head_size), dtype=torch.half, requires_grad=False, device="cuda")
+#             self.ffn = torch.zeros((bsz, self.n_embd), dtype=DTYPE, requires_grad=False, device="cuda")
+#         else:
+#             self.att = torch.zeros((self.n_embd,), dtype=DTYPE, requires_grad=False, device="cuda")
+#             self.wkv = torch.zeros((self.n_embd // self.head_size, self.head_size, self.head_size), dtype=torch.half, requires_grad=False, device="cuda")
+#             self.ffn = torch.zeros((self.n_embd,), dtype=DTYPE, requires_grad=False, device="cuda")
+
+
+# class STATE(MyModule):
+#     def __init__(self, n_layer: int, n_embd: int, head_size: int, bsz: int=0):
+#         super().__init__()
+#         self.n_layer = n_layer
+#         self.n_embd = n_embd
+#         self.head_size = head_size
+#         self.bsz = bsz
+#         self.layer = nn.ModuleList([STATEone(n_embd, head_size, bsz) for i in range(n_layer)])
+#         if bsz >= 1:
+#             self.elapsed_t = torch.zeros((bsz,), dtype=torch.int32, requires_grad=False, device="cuda")
+#         else:
+#             self.elapsed_t = torch.zeros((), dtype=torch.int32, requires_grad=False, device="cuda")
+
+#     def generate_zero_state(self, bsz: int):
+#         if bsz >= 1:
+#             self.elapsed_t = torch.zeros((bsz,), dtype=torch.int32, requires_grad=False, device="cuda")
+#         else:
+#             self.elapsed_t = torch.zeros((), dtype=torch.int32, requires_grad=False, device="cuda")
+#         for i in range(self.n_layer):
+#             self.layer[i].generate_zero_state(bsz)
+
+import gc
+
 class RWKV_x070(MyModule):
     def __init__(self, args):
         super().__init__()
@@ -202,24 +251,34 @@ class RWKV_x070(MyModule):
                 max_layer = max(max_layer, int(kk[1]))
         args.n_layer = max_layer + 1
         print(args)
-        self.n_layer, self.n_embd = args.n_layer, args.n_embd
+        self.n_layer, self.n_embd, self.head_size = args.n_layer, args.n_embd, self.head_size
 
         z['emb.weight'] = F.layer_norm(z['emb.weight'], (args.n_embd,), weight=z['blocks.0.ln0.weight'], bias=z['blocks.0.ln0.bias'])
         z['blocks.0.att.v0'] = z['blocks.0.att.a0'] # actually ignored
         z['blocks.0.att.v1'] = z['blocks.0.att.a1'] # actually ignored
         z['blocks.0.att.v2'] = z['blocks.0.att.a2'] # actually ignored
+        # state = STATE(args.n_layer, args.n_embd, args.head_size)
+        
+        # state[self.n_layer*3] = torch.zeros((), dtype=torch.int32, requires_grad=False, device="cuda")
+        # for i in range(self.n_layer): # state: 0=att_x_prev 1=att_kv 2=ffn_x_prev
+        #     state[i*3+0] = torch.zeros(self.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
+        #     state[i*3+1] = torch.zeros((self.n_embd // self.head_size, self.head_size, self.head_size), dtype=DTYPE, requires_grad=False, device="cuda")
+        #     state[i*3+2] = torch.zeros(self.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
 
-    def generate_zero_state(self, bsz):
-        args = self.args
-        state = [None, None, None]
-        if bsz >= 1:
-            state[0] = torch.zeros((args.n_layer, 2, bsz, args.n_embd), dtype=DTYPE, requires_grad=False, device="cuda")
-            state[1] = torch.zeros((args.n_layer, bsz, args.n_embd // args.head_size, args.head_size, args.head_size), dtype=DTYPE, requires_grad=False, device="cuda")
-            state[2] = torch.zeros((bsz,), dtype=torch.int32, requires_grad=False, device="cuda")
+    def generate_zero_state(self, bsz=0):
+        state = [None for _ in range(self.n_layer * 3 + 1)]
+        if bsz == 0:
+            state[self.n_layer*3] = torch.zeros((), dtype=torch.int32, requires_grad=False, device="cuda")
+            for i in range(self.n_layer): # state: 0=att_x_prev 1=att_kv 2=ffn_x_prev
+                state[i*3+0] = torch.zeros(self.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
+                state[i*3+1] = torch.zeros((self.n_embd // self.head_size, self.head_size, self.head_size), dtype=DTYPE, requires_grad=False, device="cuda")
+                state[i*3+2] = torch.zeros(self.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
         else:
-            state[0] = torch.zeros((args.n_layer, 2, args.n_embd), dtype=DTYPE, requires_grad=False, device="cuda")
-            state[1] = torch.zeros((args.n_layer, args.n_embd // args.head_size, args.head_size, args.head_size), dtype=DTYPE, requires_grad=False, device="cuda")
-            state[2] = torch.zeros((), dtype=torch.int32, requires_grad=False, device="cuda")
+            state[self.n_layer*3] = torch.zeros((), dtype=torch.int32, requires_grad=False, device="cuda")
+            for i in range(self.n_layer): # state: 0=att_x_prev 1=att_kv 2=ffn_x_prev
+                state[i*3+0] = torch.zeros((bsz, self.n_embd), dtype=DTYPE, requires_grad=False, device="cuda")
+                state[i*3+1] = torch.zeros((bsz, self.n_embd // self.head_size, self.head_size, self.head_size), dtype=DTYPE, requires_grad=False, device="cuda")
+                state[i*3+2] = torch.zeros((bsz, self.n_embd), dtype=DTYPE, requires_grad=False, device="cuda")
         return state
 
     def forward(self, idx, state, full_output=False): # will modify state in-place
@@ -241,31 +300,32 @@ class RWKV_x070(MyModule):
         if len(set(lengths)) == 1 and full_output == False:
             return self.forward_batch_same_length(tokens, state, full_output)
 
-        bsz = len(tokens)
-        pos = [0] * bsz
+        raise NotImplementedError("varlen not implemented")
+        # bsz = len(tokens)
+        # pos = [0] * bsz
 
-        if full_output == False:
-            out = torch.empty((bsz, self.args.vocab_size), dtype=DTYPE, requires_grad=False, device="cuda")
-        else:
-            out = [torch.empty((0, self.args.vocab_size), dtype=DTYPE, requires_grad=False, device="cuda") for _ in range(bsz)]
-        while True:
-            active = [i for i in range(bsz) if pos[i] < lengths[i]]
-            if not active:
-                break
-            step = min(lengths[i] - pos[i] for i in active)
-            batch_tokens = [tokens[i][pos[i]:pos[i]+step] for i in active]
-            batch_state = [state[0][:,:,active],state[1][:,active], state[2][active]] # state[0]=[Layer][2][Bsz][C]    state[1]=[Layer][Bsz][H][N][N]
-            new_out = self.forward_batch_same_length(batch_tokens, batch_state, full_output)
-            for k, i in enumerate(active):
-                if full_output == False:
-                    out[i] = new_out[k]
-                else:
-                    out[i] = torch.cat([out[i], new_out[k]], dim=0)
-                state[0][:,:,i] = batch_state[0][:,:,k]
-                state[1][:,i] = batch_state[1][:,k]
-                state[2][i] = batch_state[2][k]
-                pos[i] += step
-        return out
+        # if full_output == False:
+        #     out = torch.empty((bsz, self.args.vocab_size), dtype=DTYPE, requires_grad=False, device="cuda")
+        # else:
+        #     out = [torch.empty((0, self.args.vocab_size), dtype=DTYPE, requires_grad=False, device="cuda") for _ in range(bsz)]
+        # while True:
+        #     active = [i for i in range(bsz) if pos[i] < lengths[i]]
+        #     if not active:
+        #         break
+        #     step = min(lengths[i] - pos[i] for i in active)
+        #     batch_tokens = [tokens[i][pos[i]:pos[i]+step] for i in active]
+        #     batch_state = [state[0][:,:,active],state[1][:,active], state[2][active]] # state[0]=[Layer][2][Bsz][C]    state[1]=[Layer][Bsz][H][N][N]
+        #     new_out = self.forward_batch_same_length(batch_tokens, batch_state, full_output)
+        #     for k, i in enumerate(active):
+        #         if full_output == False:
+        #             out[i] = new_out[k]
+        #         else:
+        #             out[i] = torch.cat([out[i], new_out[k]], dim=0)
+        #         state[0][:,:,i] = batch_state[0][:,:,k]
+        #         state[1][:,i] = batch_state[1][:,k]
+        #         state[2][i] = batch_state[2][k]
+        #         pos[i] += step
+        # return out
 
     def forward_batch_same_length(self, tokens, state, full_output=False):
         assert type(tokens) is list
@@ -276,7 +336,6 @@ class RWKV_x070(MyModule):
     def forward_one(self, x:torch.Tensor, state:List[torch.Tensor]):
         with torch.no_grad(): 
             z = self.z
-
             v_first = torch.empty_like(x)
             for i in range(self.n_layer):
                 bbb = f'blocks.{i}.'
@@ -284,23 +343,23 @@ class RWKV_x070(MyModule):
                 ffn = f'blocks.{i}.ffn.'
 
                 xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln1.weight'], bias=z[bbb+'ln1.bias'])
-
-                xx, v_first = RWKV_x070_TMix_one(i, self.n_head, self.head_size, xx, state[0][i], v_first, state[1][i],
+                xx, v_first = RWKV_x070_TMix_one(i, self.n_head, self.head_size, xx, state[3*i], v_first, state[3*i+1],
                     z[att+'x_r'], z[att+'x_w'], z[att+'x_k'], z[att+'x_v'], z[att+'x_a'], z[att+'x_g'],
                     z[att+'w0'], z[att+'w1'], z[att+'w2'], z[att+'a0'], z[att+'a1'], z[att+'a2'], z[att+'v0'], z[att+'v1'], z[att+'v2'],
                     z[att+'g1'], z[att+'g2'], z[att+'k_k'], z[att+'k_a'], z[att+'r_k'],
                     z[att+'receptance.weight'], z[att+'key.weight'], z[att+'value.weight'], z[att+'output.weight'],
-                    z[att+'ln_x.weight'], z[att+'ln_x.bias'], state[2])
+                    z[att+'ln_x.weight'], z[att+'ln_x.bias'], state[3*self.n_layer])
                 x = x + xx
 
                 xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln2.weight'], bias=z[bbb+'ln2.bias'])
 
-                xx = RWKV_x070_CMix_one(xx, state[0][i], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'])
+                xx = RWKV_x070_CMix_one(xx, state[3*i+2], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'])
                 x = x + xx
             
             x = F.layer_norm(x, (self.n_embd,), weight=z['ln_out.weight'], bias=z['ln_out.bias'])
             x = F.linear(x, z['head.weight'])
-            state[2] += 1
+            # state[2] += 1
+            state[3*self.n_layer] += 1
             return x
         
     @MyFunction
@@ -316,24 +375,24 @@ class RWKV_x070(MyModule):
                 ffn = f'blocks.{i}.ffn.'
 
                 xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln1.weight'], bias=z[bbb+'ln1.bias'])
-
-                xx, v_first = RWKV_x070_TMix_seq(i, self.n_head, self.head_size, xx, state[0][i], v_first, state[1][i],
+                xx, v_first = RWKV_x070_TMix_seq(i, self.n_head, self.head_size, xx, state[3*i], v_first, state[3*i+1],
                     z[att+'x_r'], z[att+'x_w'], z[att+'x_k'], z[att+'x_v'], z[att+'x_a'], z[att+'x_g'],
                     z[att+'w0'], z[att+'w1'], z[att+'w2'], z[att+'a0'], z[att+'a1'], z[att+'a2'], z[att+'v0'], z[att+'v1'], z[att+'v2'],
                     z[att+'g1'], z[att+'g2'], z[att+'k_k'], z[att+'k_a'], z[att+'r_k'],
                     z[att+'receptance.weight'], z[att+'key.weight'], z[att+'value.weight'], z[att+'output.weight'],
-                    z[att+'ln_x.weight'], z[att+'ln_x.bias'], state[2])
+                    z[att+'ln_x.weight'], z[att+'ln_x.bias'], state[3*self.n_layer])
                 x = x + xx
 
                 xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln2.weight'], bias=z[bbb+'ln2.bias'])
 
-                xx = RWKV_x070_CMix_seq(xx, state[0][i], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'])
+                xx = RWKV_x070_CMix_seq(xx, state[3*i+2], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'])
                 x = x + xx
             
             if not full_output: x = x[-1,:]
             x = F.layer_norm(x, (self.n_embd,), weight=z['ln_out.weight'], bias=z['ln_out.bias'])
             x = F.linear(x, z['head.weight'])
-            state[2] += len(idx)
+            # state[2] += len(idx)
+            state[3*self.n_layer] += len(idx)
             return x
         
     @MyFunction
@@ -349,32 +408,32 @@ class RWKV_x070(MyModule):
                 ffn = f'blocks.{i}.ffn.'
 
                 xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln1.weight'], bias=z[bbb+'ln1.bias'])
-
-                xx, v_first = RWKV_x070_TMix_seq_batch(i, self.n_head, self.head_size, xx, state[0][i], v_first, state[1][i],
+                xx, v_first = RWKV_x070_TMix_seq_batch(i, self.n_head, self.head_size, xx, state[3*i], v_first, state[3*i+1],
                     z[att+'x_r'], z[att+'x_w'], z[att+'x_k'], z[att+'x_v'], z[att+'x_a'], z[att+'x_g'],
                     z[att+'w0'], z[att+'w1'], z[att+'w2'], z[att+'a0'], z[att+'a1'], z[att+'a2'], z[att+'v0'], z[att+'v1'], z[att+'v2'],
                     z[att+'g1'], z[att+'g2'], z[att+'k_k'], z[att+'k_a'], z[att+'r_k'],
                     z[att+'receptance.weight'], z[att+'key.weight'], z[att+'value.weight'], z[att+'output.weight'],
-                    z[att+'ln_x.weight'], z[att+'ln_x.bias'], state[2])
+                    z[att+'ln_x.weight'], z[att+'ln_x.bias'], state[3*self.n_layer])
                 x = x + xx
 
                 xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln2.weight'], bias=z[bbb+'ln2.bias'])
 
-                xx = RWKV_x070_CMix_seq_batch(xx, state[0][i], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'])
+                xx = RWKV_x070_CMix_seq_batch(xx, state[3*i+2], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'])
                 x = x + xx
             
             if not full_output: x = x[:,-1,:]
             x = F.layer_norm(x, (self.n_embd,), weight=z['ln_out.weight'], bias=z['ln_out.bias'])
             x = F.linear(x, z['head.weight'])
-            state[2] += len(idxs[0])
+            state[3*self.n_layer] += len(idxs[0])
             return x
 
 ########################################################################################################
 
 @MyStatic
 def RWKV_x070_TMix_one(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x_r, x_w, x_k, x_v, x_a, x_g, w0, w1, w2, a0, a1, a2, v0, v1, v2, g1, g2, k_k, k_a, r_k, R_, K_, V_, O_, ln_w, ln_b, elapsed_t):
-    xx = x_prev[0] - x
-    x_prev[0] = x
+    xx = x_prev - x
+    x_prev.copy_(x)
+    # x_prev = x
     xr, xw, xk, xv, xa, xg = x+xx*x_r, x+xx*x_w, x+xx*x_k, x+xx*x_v, x+xx*x_a, x+xx*x_g
 
     r = F.linear(xr, R_)
@@ -399,8 +458,9 @@ def RWKV_x070_TMix_one(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x
 @MyStatic
 def RWKV_x070_TMix_seq(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x_r, x_w, x_k, x_v, x_a, x_g, w0, w1, w2, a0, a1, a2, v0, v1, v2, g1, g2, k_k, k_a, r_k, R_, K_, V_, O_, ln_w, ln_b, elapsed_t):
     T = x.shape[0]
-    xx = torch.cat((x_prev[0].unsqueeze(0), x[:-1,:])) - x
-    x_prev[0] = x[-1,:]
+    xx = torch.cat((x_prev.unsqueeze(0), x[:-1,:])) - x
+    x_prev.copy_(x[-1])
+    # x_prev = x[-1]
     xr, xw, xk, xv, xa, xg = x+xx*x_r, x+xx*x_w, x+xx*x_k, x+xx*x_v, x+xx*x_a, x+xx*x_g
 
     r = F.linear(xr, R_)
@@ -425,8 +485,9 @@ def RWKV_x070_TMix_seq(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x
 @MyStatic
 def RWKV_x070_TMix_seq_batch(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x_r, x_w, x_k, x_v, x_a, x_g, w0, w1, w2, a0, a1, a2, v0, v1, v2, g1, g2, k_k, k_a, r_k, R_, K_, V_, O_, ln_w, ln_b, elapsed_t):
     B,T,C = x.shape
-    xx = torch.cat((x_prev[0].unsqueeze(1), x[:,:-1,:]), dim=1) - x
-    x_prev[0] = x[:,-1,:]
+    xx = torch.cat((x_prev.unsqueeze(1), x[:,:-1,:]), dim=1) - x
+    x_prev.copy_(x[:,-1,:])
+    # x_prev = x[:,-1,:]
     xr, xw, xk, xv, xa, xg = x+xx*x_r, x+xx*x_w, x+xx*x_k, x+xx*x_v, x+xx*x_a, x+xx*x_g
 
     r = F.linear(xr, R_)
@@ -459,8 +520,9 @@ def RWKV_x070_TMix_seq_batch(layer_id: int, H:int, N:int, x, x_prev, v_first, st
 
 @MyStatic
 def RWKV_x070_CMix_one(x, x_prev, x_k, K_, V_):
-    xx = x_prev[1] - x
-    x_prev[1] = x
+    xx = x_prev - x
+    x_prev.copy_(x)
+    # x_prev = x
     k = x + xx * x_k
     k = torch.relu(F.linear(k, K_)) ** 2
     # kv1 = torch.ops.flag_gems.rwkv_mm_sparsity(k, V_)
@@ -470,8 +532,9 @@ def RWKV_x070_CMix_one(x, x_prev, x_k, K_, V_):
 
 @MyStatic
 def RWKV_x070_CMix_seq(x, x_prev, x_k, K_, V_):
-    xx = torch.cat((x_prev[1].unsqueeze(0), x[:-1,:])) - x
-    x_prev[1] = x[-1,:]
+    xx = torch.cat((x_prev.unsqueeze(0), x[:-1,:])) - x
+    x_prev.copy_(x[-1])
+    # x_prev = x[-1]
     k = x + xx * x_k
     k = torch.relu(F.linear(k, K_)) ** 2
     # print("Sparsity:", (k == 0).float().mean().item())
@@ -479,8 +542,9 @@ def RWKV_x070_CMix_seq(x, x_prev, x_k, K_, V_):
 
 @MyStatic
 def RWKV_x070_CMix_seq_batch(x, x_prev, x_k, K_, V_):
-    xx = torch.cat((x_prev[1].unsqueeze(1), x[:,:-1,:]), dim=1) - x
-    x_prev[1] = x[:,-1,:]
+    xx = torch.cat((x_prev.unsqueeze(1), x[:,:-1,:]), dim=1) - x
+    x_prev.copy_(x[:,-1,:])
+    # x_prev = x[:,-1,:]
     k = x + xx * x_k
     k = torch.relu(F.linear(k, K_)) ** 2
     return k @ V_ # F.linear(k, V_)
