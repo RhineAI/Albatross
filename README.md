@@ -12,6 +12,14 @@ Then run the benchmark script:
 python benchmark.py
 ```
 
+## result @ 251127, CUDA FFN
+```
+Decode (with compile):
+Token/s = 123.53 (forward), 122.86 (full) || Bandwidth = 1712.55 GB/s || 4.1s
+Decode (compile + CUDAGraph):
+Token/s = 145.98 (forward), 145.25 (full) || Bandwidth = 2023.73 GB/s || 1.763s
+```
+
 ## result @ 251111, discrete state
 ```
 Decode (with compile):

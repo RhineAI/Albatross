@@ -27,7 +27,7 @@ args.head_size = 64
 #
 args.MODEL_NAME = "/models/rwkv7-g0a-7.2b-20250829-ctx4096"
 # args.MODEL_NAME = "/models/rwkv7-g1a3-1.5b-20251015-ctx8192"
-# args.MODEL_NAME = "/models/rwkv7-g0a3-13.3b-20251031-ctx4096"
+# args.MODEL_NAME = "/models/rwkv7-g0a4-13.3b-20251114-ctx8192"
 # args.MODEL_NAME = "/models/rwkv7-g1a3-2.9b-20251103-ctx8192"
 # args.MODEL_NAME = "/models/rwkv7-g1a-0.1b-20250728-ctx4096"
 # args.MODEL_NAME = "/models/rwkv7-g1a-0.4b-20250905-ctx4096"
@@ -104,7 +104,12 @@ def xprint(s):
 
 ########################################################################################################
 
+from torch.profiler import schedule
+from torch.profiler import profile, ProfilerActivity, record_function
+# my_schedule = schedule(skip_first=1, wait=1, warmup=1, active=1)
 xprint("Decode")
+
+
 
 prompt = "User: simulate SpaceX mars landing using python\n\nAssistant: <think"
 LENGTH_PER_TRIAL = 256
@@ -120,6 +125,8 @@ out = model.forward(tokenizer.encode(prompt), state)
 times = []
 all_times = []
 t000 = time.perf_counter()
+
+
 for i in range(LENGTH_PER_TRIAL):
     t00 = time.perf_counter()
     token = sampler_simple(out, noise=0).item()
@@ -141,9 +148,40 @@ times = np.percentile(times, SHOW_SPEED_PERCENTILE)
 all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
 print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
 
-# exit(0)
 
-# # #######################################################################################################
+# LENGTH_PER_TRIAL = 8
+# times = []
+# all_times = []
+# t000 = time.perf_counter()
+
+# with profile(
+#     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+#     schedule=torch.profiler.schedule(skip_first=2, wait=2, warmup=2, active=2),
+# ) as p:
+#     for i in range(LENGTH_PER_TRIAL):
+#         # t00 = time.perf_counter()
+#         token = sampler_simple(out, noise=0).item()
+#         all_tokens += [token]
+#         try:
+#             tmp = tokenizer.decode(all_tokens[out_last:], utf8_errors="strict")
+#             print(tmp, end="", flush=True) # only print when we have a valid utf-8 string
+#             out_last = i+1
+#         except:
+#             pass
+#         # torch.cuda.synchronize()
+#         # t0 = time.perf_counter()
+#         out = model.forward(token, state)
+#         p.step()
+#         # torch.cuda.synchronize()
+#         # t1 = time.perf_counter()
+#         # times.append(t1 - t0)
+#         # all_times.append(t1 - t00)
+# # times = np.percentile(times, SHOW_SPEED_PERCENTILE)
+# # all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
+# # print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
+# p.export_chrome_trace("trace_ffn_cuda.json")
+# exit(0)
+#######################################################################################################
 
 xprint("Decode (CUDAGraph)")
 
@@ -213,7 +251,7 @@ exit(0)
 
 xprint("Decode (batch)")
 
-for BSZ in [320, 320, 960, 960]:
+for BSZ in [960, 960, 960, 960]:
 # for BSZ in [512, 512, 512, 512]:
     torch.cuda.empty_cache()
     gc.collect()
