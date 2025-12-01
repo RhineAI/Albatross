@@ -12,6 +12,15 @@ Then run the benchmark script:
 python benchmark.py
 ```
 
+## 251201 Faster prefill via `cp.async`
+```
+CTX_LEN 256 : avg loss 1.7936 || prefill 9267 token/s = 128.47 TFLOPS
+CTX_LEN 512 : avg loss 1.6549 || prefill 10133 token/s = 140.47 TFLOPS
+CTX_LEN 1024 : avg loss 1.5689 || prefill 10750 token/s = 149.04 TFLOPS
+CTX_LEN 2048 : avg loss 1.5141 || prefill 10921 token/s = 151.4 TFLOPS
+CTX_LEN 4096 : avg loss 1.4825 || prefill 11289 token/s = 156.51 TFLOPS
+```
+
 ## result @ 251127, CUDA FFN
 ```
 Decode (with compile):

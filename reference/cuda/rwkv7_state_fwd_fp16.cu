@@ -21,95 +21,6 @@ constexpr float nexp_half_log2_e = -0.8750387749145276f, nlog2_e = -1.4426950408
 constexpr int ro1 = (int)2654435769;
 #define rotator1(_A) (two_to_neg_41*float(ro1*(_A)))
 
-
-template <bool Tis1=false>
-__global__ void kernel_forward_w0_fp16_dither(
-    const int B, const int T, const int C, const int H,
-    F *__restrict__ _state, const F *__restrict__ const _r, const F *__restrict__ const _w, const F *__restrict__ const _k, const F *__restrict__ const _v, const F *__restrict__ const _a, const F *__restrict__ const _b,
-    F *__restrict__ const _y, const int *__restrict__ const _elapsed_t){
-    
-    if constexpr (Tis1) {
-        __builtin_assume(T==1);
-    }
-    const int bbb = blockIdx.x / H;
-    const int h = blockIdx.x % H;
-    const int i = threadIdx.x;
-
-    __shared__ __align__(256) half2 state_smem[_N_][_N_ / 2];
-
-    _state += bbb * C * _N_ + h * _N_ * _N_;
-    constexpr int ldg_size = sizeof(int4) / sizeof(F);
-    #pragma unroll
-    for (int j0 = 0; j0 < _N_ / ldg_size; j0++){
-        int4 state_vec = ((int4 *)_state)[j0 * _N_ + i];
-        for (int j1 = 0; j1 < ldg_size / 2; j1++){
-            int row = j0 * ldg_size + i * ldg_size / _N_;
-            int col = i * ldg_size % _N_ / 2 + j1;
-            state_smem[row][(row % 32) ^ col] = ((half2 *)&state_vec)[j1];
-        }
-    }
-    __syncthreads();
-    half2 state[_N_ / 2];
-    #pragma unroll
-    for (int j = 0; j < _N_ / 2; j++)
-        state[j] = state_smem[i][(i % 32) ^ j];
-    
-    __shared__ __align__(128) half2 r[_N_ / 2], k[_N_ / 2], w[_N_ / 2], a[_N_ / 2], b[_N_ / 2];
-    #pragma unroll
-    for (int _t = 0; _t < T; _t++){
-        const int t = bbb*T*C + h*_N_ + i + _t * C;
-        __syncthreads();
-        ((F *)w)[i] = F(exp2f(nexp_half_log2_e / (1.0f + exp2f(nlog2_e * (float)_w[t]))) - 1.0f + rotator1(_elapsed_t[bbb]+_t));
-        ((F *)k)[i] = _k[t];
-        ((F *)a)[i] = _a[t];
-        ((F *)b)[i] = _b[t];
-        ((F *)r)[i] = _r[t];
-        __syncthreads();
-        half2 sa2 = {0., 0.};
-        #pragma unroll
-        for (int j = 0; j < _N_ / 2; j++)
-            sa2 = __hfma2(a[j], state[j], sa2);
-            // sa2 += a[j] * state[j];
-        half sa = sa2.x + sa2.y;
-        sa2 = {sa, sa};
-
-        half vv = _v[t];
-        half2 vv2 = {vv, vv};
-        half2 y2 = {0., 0.};
-        #pragma unroll
-        for (int j = 0; j < _N_ / 2; j++){
-            half2 &s = state[j];
-            s = __hfma2(s, w[j], __hfma2(k[j], vv2, __hfma2(sa2, b[j], s)));
-            // s += s * w[j] + k[j] * vv2 + sa2 * b[j];
-            y2 = __hfma2(s, r[j], y2);
-            // y2 += s * r[j];
-        }
-        _y[t] = y2.x + y2.y;
-    }
-    #pragma unroll
-    for (int j = 0; j < _N_ / 2; j++)
-        state_smem[i][(i % 32) ^ j] = state[j];
-    __syncthreads();
-    #pragma unroll
-    for (int j0 = 0; j0 < _N_ / ldg_size; j0++){
-        int4 state_vec;
-        for (int j1 = 0; j1 < ldg_size / 2; j1++){
-            int row = j0 * ldg_size + i * ldg_size / _N_;
-            int col = i * ldg_size % _N_ / 2 + j1;
-            ((half2 *)&state_vec)[j1] = state_smem[row][(row % 32) ^ col];
-        }
-        ((int4 *)_state)[j0 * _N_ + i] = state_vec;
-    }
-}
-
-
-__device__ __forceinline__ float warp_reduce_sum(float v) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
-        v += __shfl_down_sync(0xffffffff, v, offset);
-    return v;
-}
-
 union common128 {
     int4 I;
     struct {int x,y,z,w;} J;
@@ -118,10 +29,18 @@ union common128 {
     struct {half2 x,y,z,w;} G;
     struct {half a,b,c,d,e,f,g,h;} H;
     half h[8];
+    half2 h2[4];
     unsigned short s[8];
     int i[4];
     float f[4];
 };
+
+__device__ __forceinline__ float warp_reduce_sum(float v) {
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        v += __shfl_down_sync(0xffffffff, v, offset);
+    return v;
+}
 
 template <int N>
 __device__ __forceinline__ void cp_async_gs_conditional(void const *const smem_addr,
@@ -162,6 +81,204 @@ __device__ __forceinline__ void cp_async_wait() {
 __device__ __forceinline__ void cp_async_commit() {
     asm volatile("cp.async.commit_group;\n" ::);
 }
+
+template <bool Tis1=false>
+__global__ void __launch_bounds__(_N_, 1) kernel_forward_w0_fp16_dither(
+    const int B, const int T, const int C, const int H,
+    F *__restrict__ _state, const F *__restrict__ const _r, const F *__restrict__ const _w, const F *__restrict__ const _k, const F *__restrict__ const _v, const F *__restrict__ const _a, const F *__restrict__ const _b,
+    F *__restrict__ const _y, const int *__restrict__ const _elapsed_t){
+    
+    if constexpr (Tis1) {
+        __builtin_assume(T==1);
+    }
+    const int bbb = blockIdx.x / H;
+    const int h = blockIdx.x % H;
+    const int i = threadIdx.x;
+    const int L = i%32;
+
+    __shared__ __align__(256) half2 state_smem[_N_][_N_ / 2];
+
+    _state += bbb * C * _N_ + h * _N_ * _N_;
+    constexpr int ldg_size = sizeof(int4) / sizeof(F);
+    #pragma unroll
+    for (int j0 = 0; j0 < _N_ / ldg_size; j0++){
+        int4 state_vec = ((int4 *)_state)[j0 * _N_ + i];
+        for (int j1 = 0; j1 < ldg_size / 2; j1++){
+            int row = j0 * ldg_size + i * ldg_size / _N_;
+            int col = i * ldg_size % _N_ / 2 + j1;
+            state_smem[row][(row % 32) ^ col] = ((half2 *)&state_vec)[j1];
+        }
+    }
+    __syncthreads();
+    half2 state[_N_ / 2];
+    #pragma unroll
+    for (int j = 0; j < _N_ / 2; j++)
+        state[j] = state_smem[i][L^j];
+    
+    __shared__ __align__(128) half2 r[_N_ / 2], k[_N_ / 2], w[_N_ / 2], a[_N_ / 2], b[_N_ / 2];
+    #pragma unroll
+    for (int _t = 0; _t < T; _t++){
+        int t = bbb*T*C + h*_N_ + _t * C; // + i
+        __syncthreads();
+        cp_async_gs_conditional<4>((half2*)(i<32?w:a)+L, (half2*)((i<32?_w:_a)+t)+L, true);
+        cp_async_commit();
+        cp_async_gs_conditional<4>((half2*)(i<32?r:k)+L, (half2*)((i<32?_r:_k)+t)+L, true);
+        cp_async_gs_conditional<4>((half2*)b+L, (half2*)(_b+t)+L, i<32);
+        cp_async_commit();
+        half vv = _v[t+i];
+        half2 vv2 = {vv, vv};
+        half2 y2 = {0., 0.};
+        half2 sa2 = {0., 0.};
+        cp_async_wait<1>();
+        __syncthreads();
+        #pragma unroll
+        for (int j = 0; j < _N_ / 2; j++)
+            sa2 = __hfma2(a[j], state[j], sa2);
+        half sa = sa2.x + sa2.y;
+        sa2 = {sa, sa};
+        ((F*)w)[i] = F(exp2f(nexp_half_log2_e / (1.0f + exp2f(nlog2_e * (float)(((F*)w)[i])))) - 1.0f + rotator1(_elapsed_t[bbb]+_t));
+
+        cp_async_wait<0>();
+        __syncthreads();
+        #pragma unroll
+        for (int j = 0; j < _N_ / 2; j++){
+            half2 &s = state[j];
+            s = __hfma2(s, w[j], __hfma2(k[j], vv2, __hfma2(sa2, b[j], s)));
+            y2 = __hfma2(s, r[j], y2);
+        }
+        _y[t+i] = y2.x + y2.y;
+    }
+    #pragma unroll
+    for (int j = 0; j < _N_ / 2; j++)
+        state_smem[i][L^j] = state[j];
+    __syncthreads();
+    #pragma unroll
+    for (int j0 = 0; j0 < _N_ / ldg_size; j0++){
+        int4 state_vec;
+        for (int j1 = 0; j1 < ldg_size / 2; j1++){
+            int row = j0 * ldg_size + i * ldg_size / _N_;
+            int col = i * ldg_size % _N_ / 2 + j1;
+            ((half2 *)&state_vec)[j1] = state_smem[row][(row % 32) ^ col];
+        }
+        ((int4 *)_state)[j0 * _N_ + i] = state_vec;
+    }
+}
+
+// template <bool Tis1=false>
+// __global__ void kernel_forward_w0_fp16_dither(
+//     const int B, const int T, const int C, const int H,
+//     F *__restrict__ _state, const F *__restrict__ const _r, const F *__restrict__ const _w, const F *__restrict__ const _k, const F *__restrict__ const _v, const F *__restrict__ const _a, const F *__restrict__ const _b,
+//     F *__restrict__ const _y, const int *__restrict__ const _elapsed_t){
+    
+//     if constexpr (Tis1) {
+//         __builtin_assume(T==1);
+//     }
+//     const int bbb = blockIdx.x / H;
+//     const int h = blockIdx.x % H;
+//     const int i = threadIdx.x;
+
+//     __shared__ __align__(256) half2 state_smem[_N_][_N_ / 2];
+
+//     _state += bbb * C * _N_ + h * _N_ * _N_;
+//     constexpr int ldg_size = sizeof(int4) / sizeof(F);
+//     #pragma unroll
+//     for (int j0 = 0; j0 < _N_ / ldg_size; j0++){
+//         int4 state_vec = ((int4 *)_state)[j0 * _N_ + i];
+//         for (int j1 = 0; j1 < ldg_size / 2; j1++){
+//             int row = j0 * ldg_size + i * ldg_size / _N_;
+//             int col = i * ldg_size % _N_ / 2 + j1;
+//             state_smem[row][(row % 32) ^ col] = ((half2 *)&state_vec)[j1];
+//         }
+//     }
+//     __syncthreads();
+//     half2 state[_N_ / 2];
+//     #pragma unroll
+//     for (int j = 0; j < _N_ / 2; j++)
+//         state[j] = state_smem[i][(i % 32) ^ j];
+    
+//     __shared__ __align__(128) half2 r[_N_ / 2], k[_N_ / 2], w[_N_ / 2], a[_N_ / 2], b[_N_ / 2];
+//     #pragma unroll
+//     for (int _t = 0; _t < T; _t++){
+//         const int t = bbb*T*C + h*_N_ + i + _t * C;
+//         __syncthreads();
+//         ((F *)w)[i] = F(exp2f(nexp_half_log2_e / (1.0f + exp2f(nlog2_e * (float)_w[t]))) - 1.0f + rotator1(_elapsed_t[bbb]+_t));
+//         ((F *)k)[i] = _k[t];
+//         ((F *)a)[i] = _a[t];
+//         ((F *)b)[i] = _b[t];
+//         ((F *)r)[i] = _r[t];
+//         __syncthreads();
+//         half2 sa2 = {0., 0.};
+//         #pragma unroll
+//         for (int j = 0; j < _N_ / 2; j++)
+//             sa2 = __hfma2(a[j], state[j], sa2);
+//             // sa2 += a[j] * state[j];
+//         half sa = sa2.x + sa2.y;
+//         sa2 = {sa, sa};
+
+//         half vv = _v[t];
+//         half2 vv2 = {vv, vv};
+//         half2 y2 = {0., 0.};
+//         #pragma unroll
+//         for (int j = 0; j < _N_ / 2; j++){
+//             half2 &s = state[j];
+//             s = __hfma2(s, w[j], __hfma2(k[j], vv2, __hfma2(sa2, b[j], s)));
+//             // s += s * w[j] + k[j] * vv2 + sa2 * b[j];
+//             y2 = __hfma2(s, r[j], y2);
+//             // y2 += s * r[j];
+//         }
+//         _y[t] = y2.x + y2.y;
+//     }
+//     #pragma unroll
+//     for (int j = 0; j < _N_ / 2; j++)
+//         state_smem[i][(i % 32) ^ j] = state[j];
+//     __syncthreads();
+//     #pragma unroll
+//     for (int j0 = 0; j0 < _N_ / ldg_size; j0++){
+//         int4 state_vec;
+//         for (int j1 = 0; j1 < ldg_size / 2; j1++){
+//             int row = j0 * ldg_size + i * ldg_size / _N_;
+//             int col = i * ldg_size % _N_ / 2 + j1;
+//             ((half2 *)&state_vec)[j1] = state_smem[row][(row % 32) ^ col];
+//         }
+//         ((int4 *)_state)[j0 * _N_ + i] = state_vec;
+//     }
+// }
+
+
+void forward_one(int64_t B, int64_t C, int64_t H, at::Tensor &state, at::Tensor &r, at::Tensor &w, at::Tensor &k, at::Tensor &v, at::Tensor &a, at::Tensor &b, at::Tensor &y, at::Tensor &elapsed_t){
+    assert(H * _N_ == C);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    kernel_forward_w0_fp16_dither<1><<<B * H, _N_, 0, stream>>>(
+        B, 1, C, H, 
+        (F*)state.data_ptr(), 
+        (const F*)r.data_ptr(), 
+        (const F*)w.data_ptr(),
+        (const F*)k.data_ptr(), 
+        (const F*)v.data_ptr(),
+        (const F*)a.data_ptr(),
+        (const F*)b.data_ptr(),
+        (F*)y.data_ptr(), 
+        elapsed_t.data_ptr<int>()
+    );
+}
+
+
+void forward_seq(int64_t B, int64_t T, int64_t C, int64_t H, at::Tensor &state, at::Tensor &r, at::Tensor &w, at::Tensor &k, at::Tensor &v, at::Tensor &a, at::Tensor &b, at::Tensor &y, at::Tensor &elapsed_t){
+    assert(H * _N_ == C);
+    kernel_forward_w0_fp16_dither<<<B * H, _N_>>>(
+        B, T, C, H, 
+        (F*)state.data_ptr(), 
+        (const F*)r.data_ptr(), 
+        (const F*)w.data_ptr(),
+        (const F*)k.data_ptr(), 
+        (const F*)v.data_ptr(),
+        (const F*)a.data_ptr(),
+        (const F*)b.data_ptr(),
+        (F*)y.data_ptr(), 
+        elapsed_t.data_ptr<int>()
+    );
+}
+
 
 __global__ void __launch_bounds__(BLOCKDIM, 1) spvecmatmul_noindices(
     const int C,
@@ -267,106 +384,120 @@ __global__ void __launch_bounds__(BLOCKDIM, 1) spvecmatmul_noindices(
     atomicAdd((half2*)(out + by*(2*BLOCKDIM) + t*2), out_frag);
 }
 
+void spmv_forward(int64_t D, int64_t C, at::Tensor &vec1, at::Tensor &mat, at::Tensor &out) {
+    assert(C % (2*BLOCKDIM) == 0);
+    assert(D % MAXNPERBLOCK == 0);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    // cudaMemsetAsync(out, 0, C*sizeof(half), stream);
+    spvecmatmul_noindices<<<dim3(D/MAXNPERBLOCK, C/(2*BLOCKDIM), 1), dim3(BLOCKDIM, 1, 1), 0, stream>>>(
+        C, (const F*)vec1.data_ptr(), (const F*)mat.data_ptr(), (F*)out.data_ptr()
+    );
+}
+
+
+
 #define XBLOCK 2
 #define BLOCKDIMX_CMIX 512
 #define NUMWARPS (BLOCKDIMX_CMIX/32)
 
-__global__ void __launch_bounds__(BLOCKDIMX_CMIX, 1) cmix_up_kernel_2(
-    const __half* __restrict__ x_0,
-    const __half* __restrict__ x_1,
-    const __half* __restrict__ x_k,
-    const __half* __restrict__ key,
-          __half* __restrict__ out,
-    int indim,
-    int outdim
-) {
-    // block processes XBLOCK outputs
-    int block_x = blockIdx.x;                       // block index
-    int x_base = block_x * XBLOCK;                  // first x processed by this CTA
-    if (x_base >= outdim) return;
+// __global__ void __launch_bounds__(BLOCKDIMX_CMIX, 1) cmix_up_kernel_2(
+//     const __half* __restrict__ x_0,
+//     const __half* __restrict__ x_1,
+//     const __half* __restrict__ x_k,
+//     const __half* __restrict__ key,
+//           __half* __restrict__ out,
+//     int indim,
+//     int outdim
+// ) {
+//     // block processes XBLOCK outputs
+//     int block_x = blockIdx.x;                       // block index
+//     int x_base = block_x * XBLOCK;                  // first x processed by this CTA
+//     if (x_base >= outdim) return;
 
-    int t = threadIdx.x;
-    int lane = t & 31;
-    int warp_id = t >> 5; 
-    int chunk = indim / NUMWARPS;
-    int r_start = warp_id * chunk;
-    int r_end   = r_start + chunk;
+//     int t = threadIdx.x;
+//     int lane = t & 31;
+//     int warp_id = t >> 5; 
+//     int chunk = indim / NUMWARPS;
+//     int r_start = warp_id * chunk;
+//     int r_end   = r_start + chunk;
 
-    const __half2* h0 = reinterpret_cast<const __half2*>(x_0);
-    const __half2* h1 = reinterpret_cast<const __half2*>(x_1);
-    const __half2* h2 = reinterpret_cast<const __half2*>(x_k);
-    const __half2* h3_x0 = reinterpret_cast<const __half2*>(key + x_base * indim);
-    const __half2* h3_x1 = nullptr;
-    if (XBLOCK > 1) {
-        if (x_base + 1 < outdim)
-            h3_x1 = reinterpret_cast<const __half2*>(key + (x_base + 1) * indim);
-        else
-            h3_x1 = reinterpret_cast<const __half2*>(key + x_base * indim); // won't be used
-    }
+//     const __half2* h0 = (const half2*)(x_0);
+//     const __half2* h1 = (const half2*)(x_1);
+//     const __half2* h2 = (const half2*)(x_k);
+//     const __half2* h3_x0 = (const half2*)(key + x_base * indim);
+//     const __half2* h3_x1 = nullptr;
+//     if (XBLOCK > 1) {
+//         if (x_base + 1 < outdim)
+//             h3_x1 = (const half2*)(key + (x_base + 1) * indim);
+//         else
+//             h3_x1 = (const half2*)(key + x_base * indim); // won't be used
+//     }
 
-    // convert r_start/end to half2 indices
-    int i_start = r_start / 2;
-    int i_end   = r_end / 2;
+//     // convert r_start/end to half2 indices
+//     int i_start = r_start / 2;
+//     int i_end   = r_end / 2;
 
-    // accumulators for each x processed by this warp (float)
-    float acc_x0 = 0.0f;
-    float acc_x1 = 0.0f; // used only if XBLOCK>1
+//     // accumulators for each x processed by this warp (float)
+//     float acc_x0 = 0.0f;
+//     float acc_x1 = 0.0f; // used only if XBLOCK>1
 
-    // Loop: each warp's lanes process interleaved half2s with stride = 32
-    // Prefetch friendly: contiguous access across lanes -> coalesced
-    for (int i = i_start + lane; i < i_end; i += 32) {
-        // load half2s (coalesced across lanes)
-        __half2 a0 = h0[i];
-        __half2 a1 = h1[i];
-        __half2 a2 = h2[i];
-        __half2 b0 = h3_x0[i];
+//     // Loop: each warp's lanes process interleaved half2s with stride = 32
+//     // Prefetch friendly: contiguous access across lanes -> coalesced
+//     for (int i = i_start + lane; i < i_end; i += 32) {
+//         // load half2s (coalesced across lanes)
+//         __half2 a0 = h0[i];
+//         __half2 a1 = h1[i];
+//         __half2 a2 = h2[i];
+//         __half2 b0 = h3_x0[i];
 
-        // compute interp = a0 + (a1 - a0) * a2  using half2 intrinsics
-        __half2 diff = __hsub2(a1, a0);
-        __half2 interp = __hfma2(diff, a2, a0);
-        __half2 prod0 = __hmul2(interp, b0);
+//         // compute interp = a0 + (a1 - a0) * a2  using half2 intrinsics
+//         __half2 diff = __hsub2(a1, a0);
+//         __half2 interp = __hfma2(diff, a2, a0);
+//         __half2 prod0 = __hmul2(interp, b0);
 
-        float2 f0 = __half22float2(prod0);
-        acc_x0 += f0.x + f0.y;
+//         float2 f0 = __half22float2(prod0);
+//         acc_x0 += f0.x + f0.y;
 
-        if (XBLOCK > 1) {
-            __half2 b1 = h3_x1[i];
-            __half2 prod1 = __hmul2(interp, b1);
-            float2 f1 = __half22float2(prod1);
-            acc_x1 += f1.x + f1.y;
-        }
-    }
+//         if (XBLOCK > 1) {
+//             __half2 b1 = h3_x1[i];
+//             __half2 prod1 = __hmul2(interp, b1);
+//             float2 f1 = __half22float2(prod1);
+//             acc_x1 += f1.x + f1.y;
+//         }
+//     }
 
-    // Warp-level reduce within each warp
-    float warp_sum_x0 = warp_reduce_sum(acc_x0);
-    float warp_sum_x1 = XBLOCK > 1 ? warp_reduce_sum(acc_x1) : 0.0f;
+//     // Warp-level reduce within each warp
+//     float warp_sum_x0 = warp_reduce_sum(acc_x0);
+//     float warp_sum_x1 = XBLOCK > 1 ? warp_reduce_sum(acc_x1) : 0.0f;
 
-    // Use shared memory to combine across NUMWARPS warps
-    __shared__ float smem[NUMWARPS * XBLOCK]; // small: 16*2 = 32 floats
-    int sidx = warp_id * XBLOCK + (lane == 0 ? 0 : 0); // base index for this warp
-    if (lane == 0) {
-        // store warp's partial sums into shared memory (one write per warp per x)
-        smem[warp_id * XBLOCK + 0] = warp_sum_x0;
-        if (XBLOCK > 1) smem[warp_id * XBLOCK + 1] = warp_sum_x1;
-    }
-    __syncthreads();
+//     // Use shared memory to combine across NUMWARPS warps
+//     __shared__ float smem[NUMWARPS * XBLOCK]; // small: 16*2 = 32 floats
+//     int sidx = warp_id * XBLOCK + (lane == 0 ? 0 : 0); // base index for this warp
+//     if (lane == 0) {
+//         // store warp's partial sums into shared memory (one write per warp per x)
+//         smem[warp_id * XBLOCK + 0] = warp_sum_x0;
+//         if (XBLOCK > 1) smem[warp_id * XBLOCK + 1] = warp_sum_x1;
+//     }
+//     __syncthreads();
 
-    if (t == 0) {
-        float total0 = 0.0f;
-        float total1 = 0.0f;
-        for (int w = 0; w < NUMWARPS; ++w) {
-            total0 += smem[w * XBLOCK + 0];
-            if (XBLOCK > 1) total1 += smem[w * XBLOCK + 1];
-        }
-        float relu0 = max(total0, 0.f);
-        out[x_base + 0] = __float2half_rn(relu0 * relu0);
+//     if (t == 0) {
+//         float total0 = 0.0f;
+//         float total1 = 0.0f;
+//         for (int w = 0; w < NUMWARPS; ++w) {
+//             total0 += smem[w * XBLOCK + 0];
+//             if (XBLOCK > 1) total1 += smem[w * XBLOCK + 1];
+//         }
+//         float relu0 = max(total0, 0.f);
+//         out[x_base + 0] = __float2half_rn(relu0 * relu0);
 
-        if (XBLOCK > 1 && x_base + 1 < outdim) {
-            float relu1 = max(total1, 0.f);
-            out[x_base + 1] = __float2half_rn(relu1 * relu1);
-        }
-    }
-}
+//         if (XBLOCK > 1 && x_base + 1 < outdim) {
+//             float relu1 = max(total1, 0.f);
+//             out[x_base + 1] = __float2half_rn(relu1 * relu1);
+//         }
+//     }
+// }
+
+
 
 // __global__ void __launch_bounds__(BLOCKDIMX_CMIX, 1) cmix_up_kernel(
 //     const __half* __restrict__ x_0,
@@ -442,6 +573,7 @@ __global__ void __launch_bounds__(BLOCKDIMX_CMIX, 1) cmix_up_kernel_2(
 // }
 
 
+
 __global__ void __launch_bounds__(BLOCKDIMX_CMIX, 1) cmix_up_kernel(
     const __half* __restrict__ x_0,
     const __half* __restrict__ x_1,
@@ -496,72 +628,6 @@ __global__ void __launch_bounds__(BLOCKDIMX_CMIX, 1) cmix_up_kernel(
     }
 }
 
-
-#define COPY_ZERO_X 128
-template <typename T> 
-__global__ __launch_bounds__(COPY_ZERO_X, 1) void copy_zero_kernel(const T* __restrict__ a, T* __restrict__ b, T* __restrict__ c, size_t n){
-    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        const int4* src  = (const int4*)a;
-        int4*       dst  = (int4*)b;
-        int4*       dst2 = (int4*)c;
-        int4 v = src[i];
-        dst[i] = v;
-        dst2[i] = make_int4(0, 0, 0, 0);
-    }
-}
-
-void copy_zero(at::Tensor &a, at::Tensor &b, at::Tensor &c){
-    size_t n_uint4 = a.numel() * sizeof(F) / sizeof(int4);
-    auto stream = at::cuda::getCurrentCUDAStream();
-    copy_zero_kernel<<<(n_uint4+(COPY_ZERO_X-1))/COPY_ZERO_X, COPY_ZERO_X, 0, stream>>>(
-        (const F*)a.data_ptr(), (F*)b.data_ptr(), (F*)c.data_ptr(), n_uint4);
-}
-
-void forward_seq(int64_t B, int64_t T, int64_t C, int64_t H, at::Tensor &state, at::Tensor &r, at::Tensor &w, at::Tensor &k, at::Tensor &v, at::Tensor &a, at::Tensor &b, at::Tensor &y, at::Tensor &elapsed_t){
-    assert(H * _N_ == C);
-    kernel_forward_w0_fp16_dither<<<B * H, _N_>>>(
-        B, T, C, H, 
-        (F*)state.data_ptr(), 
-        (const F*)r.data_ptr(), 
-        (const F*)w.data_ptr(),
-        (const F*)k.data_ptr(), 
-        (const F*)v.data_ptr(),
-        (const F*)a.data_ptr(),
-        (const F*)b.data_ptr(),
-        (F*)y.data_ptr(), 
-        elapsed_t.data_ptr<int>()
-    );
-}
-
-void forward_one(int64_t B, int64_t C, int64_t H, at::Tensor &state, at::Tensor &r, at::Tensor &w, at::Tensor &k, at::Tensor &v, at::Tensor &a, at::Tensor &b, at::Tensor &y, at::Tensor &elapsed_t){
-    assert(H * _N_ == C);
-    auto stream = at::cuda::getCurrentCUDAStream();
-    kernel_forward_w0_fp16_dither<1><<<B * H, _N_, 0, stream>>>(
-        B, 1, C, H, 
-        (F*)state.data_ptr(), 
-        (const F*)r.data_ptr(), 
-        (const F*)w.data_ptr(),
-        (const F*)k.data_ptr(), 
-        (const F*)v.data_ptr(),
-        (const F*)a.data_ptr(),
-        (const F*)b.data_ptr(),
-        (F*)y.data_ptr(), 
-        elapsed_t.data_ptr<int>()
-    );
-}
-
-void spmv_forward(int64_t D, int64_t C, at::Tensor &vec1, at::Tensor &mat, at::Tensor &out) {
-    assert(C % (2*BLOCKDIM) == 0);
-    assert(D % MAXNPERBLOCK == 0);
-    auto stream = at::cuda::getCurrentCUDAStream();
-    // cudaMemsetAsync(out, 0, C*sizeof(half), stream);
-    spvecmatmul_noindices<<<dim3(D/MAXNPERBLOCK, C/(2*BLOCKDIM), 1), dim3(BLOCKDIM, 1, 1), 0, stream>>>(
-        C, (const F*)vec1.data_ptr(), (const F*)mat.data_ptr(), (F*)out.data_ptr()
-    );
-}
-
-
 void cmix_up(
     int64_t indim,
     int64_t outdim,
@@ -588,3 +654,78 @@ void cmix_up(
     );
 }
 
+
+#define COPY_ZERO_X 128
+template <typename T> 
+__global__ __launch_bounds__(COPY_ZERO_X, 1) void copy_zero_kernel(const T* __restrict__ a, T* __restrict__ b, T* __restrict__ c, size_t n){
+    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        const int4* src  = (const int4*)a;
+        int4*       dst  = (int4*)b;
+        int4*       dst2 = (int4*)c;
+        int4 v = src[i];
+        dst[i] = v;
+        dst2[i] = make_int4(0, 0, 0, 0);
+    }
+}
+
+void copy_zero(at::Tensor &a, at::Tensor &b, at::Tensor &c){
+    size_t n_uint4 = a.numel() * sizeof(F) / sizeof(int4);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    copy_zero_kernel<<<(n_uint4+(COPY_ZERO_X-1))/COPY_ZERO_X, COPY_ZERO_X, 0, stream>>>(
+        (const F*)a.data_ptr(), (F*)b.data_ptr(), (F*)c.data_ptr(), n_uint4);
+}
+
+
+template <bool Tis1=false>
+__global__ void __launch_bounds__(COPY_ZERO_X, 1) shift_conv(
+    const int B,
+    const int T,
+    const int C,
+    // Inputs
+    const half* __restrict__ x,
+          half* __restrict__ x_prev,
+    const half* __restrict__ x_mixing,
+    // Outputs
+    half* __restrict__ xout
+) {
+    if constexpr (Tis1) {
+        __builtin_assume(T == 1);
+    }
+    const int C2 = C/8;
+    const int bt = blockIdx.x;
+    const int b = blockIdx.x / T;
+    const int t = blockIdx.x % T;
+    const int S = B*T*C2;
+    for (int c = threadIdx.x; c<C2; c += blockDim.x) {
+        const int cur = bt*C2+c;
+        const common128 x_val = {.I = ((const int4*)x)[cur]}; // [b][t][c]
+        common128 x_shifted_val;
+        if (t == 0) {
+            x_shifted_val.I = ((const int4*)x_prev)[b*C2+c];
+        } 
+        else {
+            x_shifted_val.I = ((const int4*)x)[cur-C2]; // [b][t-1][c]
+        }
+        common128 x_diff;
+        #pragma unroll
+        for (int i=0; i<4; i++) {
+            x_diff.h2[i] = __hsub2(x_shifted_val.h2[i], x_val.h2[i]);
+        }
+        #pragma unroll
+        for (int q=0; q<6; q++){
+            const common128 xmix_coeff = {.I = ((const int4*)x_mixing)[q*C2+c]}; //[q][c]
+            common128 result;
+            #pragma unroll
+            for (int i=0; i<4; i++) {
+                result.h2[i] = __hfma2(x_diff.h2[i], xmix_coeff.h2[i], x_val.h2[i]);
+            }
+            ((int4*)xout)[q*S+bt*C2+c] = result.I;
+        }
+    }
+    if (t == T-1) {
+        for (int c = threadIdx.x; c<C2; c += blockDim.x) {
+            ((int4*)x_prev)[b*C2+c] = ((const int4*)x)[bt*C2+c];
+        }
+    }
+}

@@ -188,7 +188,7 @@ class RWKV_x070(MyModule):
     def forward(self, idx, state, full_output=False): # will modify state in-place
         if type(idx) is list:
             if len(idx) > 1:
-                return self.forward_seq(idx, state, full_output)
+                return self.forward_seq(torch.tensor(idx), state, full_output)
             else:
                 x = self.z['emb.weight'][idx[0]]
                 return self.forward_one(x, state)
@@ -243,7 +243,7 @@ class RWKV_x070(MyModule):
             return x
         
     @MyFunction
-    def forward_seq(self, idx:List[int], state:List[torch.Tensor], full_output:bool=False):
+    def forward_seq(self, idx:torch.Tensor, state:List[torch.Tensor], full_output:bool=False):
         with torch.no_grad(): 
             z = self.z
             x = z['emb.weight'][idx]
