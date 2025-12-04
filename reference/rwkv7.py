@@ -306,6 +306,48 @@ class RWKV_x070(MyModule):
             x = F.linear(x, z['head.weight'])
             state[3*self.n_layer] += len(idxs[0])
             return x
+        
+    @MyFunction
+    def forward_seq_batch_right(self, idxs:torch.Tensor, state:List[torch.Tensor], lens:torch.Tensor, full_output:bool=False):
+        with torch.no_grad():
+            L = idxs.size(1)
+            att_mask = (torch.arange(L, device="cuda", dtype=torch.int32).unsqueeze(0) < (L - lens).unsqueeze(1)).unsqueeze(2)
+            state[3*self.n_layer] = lens - L
+            z = self.z
+            x = z['emb.weight'][idxs]
+            x.masked_fill_(att_mask, 0)
+            v_first = torch.empty_like(x)
+            for i in range(self.n_layer):
+                bbb = f'blocks.{i}.'
+                att = f'blocks.{i}.att.'
+                ffn = f'blocks.{i}.ffn.'
+
+                xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln1.weight'], bias=z[bbb+'ln1.bias'])
+                xx.masked_fill_(att_mask, 0)
+                xx, v_first = RWKV_x070_TMix_seq_batch_right(i, self.n_head, self.head_size, xx, state[3*i], v_first, state[3*i+1],
+                    z[att+'x_r'], z[att+'x_w'], z[att+'x_k'], z[att+'x_v'], z[att+'x_a'], z[att+'x_g'],
+                    z[att+'w0'], z[att+'w1'], z[att+'w2'], z[att+'a0'], z[att+'a1'], z[att+'a2'], z[att+'v0'], z[att+'v1'], z[att+'v2'],
+                    z[att+'g1'], z[att+'g2'], z[att+'k_k'], z[att+'k_a'], z[att+'r_k'],
+                    z[att+'receptance.weight'], z[att+'key.weight'], z[att+'value.weight'], z[att+'output.weight'],
+                    z[att+'ln_x.weight'], z[att+'ln_x.bias'], state[3*self.n_layer], att_mask)
+                x = x + xx
+                x.masked_fill_(att_mask, 0)
+
+                xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln2.weight'], bias=z[bbb+'ln2.bias'])
+                xx.masked_fill_(att_mask, 0)
+                xx = RWKV_x070_CMix_seq_batch(xx, state[3*i+2], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'])
+                x = x + xx
+                x.masked_fill_(att_mask, 0)
+
+            if not full_output: 
+                x = x[:,-1,:]
+                x = F.layer_norm(x, (self.n_embd,), weight=z['ln_out.weight'], bias=z['ln_out.bias'])
+            else:
+                x = F.layer_norm(x, (self.n_embd,), weight=z['ln_out.weight'], bias=z['ln_out.bias'])
+                x.masked_fill_(att_mask, 0)
+            x = F.linear(x, z['head.weight'])
+            state[3*self.n_layer] += len(idxs[0])
+            return x
 
 ########################################################################################################
 
@@ -378,6 +420,36 @@ def RWKV_x070_TMix_seq_batch(layer_id: int, H:int, N:int, x, x_prev, v_first, st
     g = F.linear(torch.sigmoid(F.linear(xg, g1)), g2)
 
     kk = F.normalize((k * k_k).view(B,T,H,N), dim=-1, p=2.0).view(B,T,H*N)
+    k = k * (1 + (a-1) * k_a)
+    kka = kk * a
+
+    if layer_id == 0: v_first = v
+    else: v = v + (v_first - v) * torch.sigmoid(F.linear(F.linear(xv, v1), v2, bias=v0))
+
+    xx = RWKV7_BATCH_OP(state, r, w, k, v, -kk, kka, elapsed_t).view(B*T,H*N)
+
+    xx = F.group_norm(xx.view(B*T,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(B,T,H*N)
+    xx = xx + ((r * k * r_k).view(B,T,H,N).sum(dim=-1, keepdim=True) * v.view(B,T,H,N)).view(B,T,H*N)
+    return F.linear((xx * g), O_), v_first
+
+
+@MyStatic
+def RWKV_x070_TMix_seq_batch_right(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x_r, x_w, x_k, x_v, x_a, x_g, w0, w1, w2, a0, a1, a2, v0, v1, v2, g1, g2, k_k, k_a, r_k, R_, K_, V_, O_, ln_w, ln_b, elapsed_t, att_mask):
+    B,T,C = x.shape
+    xx = torch.cat((x_prev.unsqueeze(1), x[:,:-1,:]), dim=1) - x
+    x_prev.copy_(x[:,-1,:])
+    # x_prev = x[:,-1,:]
+    xr, xw, xk, xv, xa, xg = x+xx*x_r, x+xx*x_w, x+xx*x_k, x+xx*x_v, x+xx*x_a, x+xx*x_g
+
+    r = F.linear(xr, R_)
+    w = F.linear(torch.tanh(F.linear(xw, w1)), w2, bias=w0)
+    k = F.linear(xk, K_)
+    v = F.linear(xv, V_)
+    a = torch.sigmoid(F.linear(F.linear(xa, a1), a2, bias=a0))
+    g = F.linear(torch.sigmoid(F.linear(xg, g1)), g2)
+
+    kk = F.normalize((k * k_k).view(B,T,H,N), dim=-1, p=2.0).view(B,T,H*N)
+    kk.masked_fill_(att_mask, 0)
     k = k * (1 + (a-1) * k_a)
     kka = kk * a
 

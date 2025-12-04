@@ -88,7 +88,24 @@ def xprint(s):
 #         token_prob = probs[token_id].item()
 #         print(repr(token), f'[probability {token_prob:.2%}]')
 
-# init_outs = model.forward_batch(tokens, model.generate_zero_state(len(prompts)))
+# idx = tokens
+# B = len(idx)
+# state = model.generate_zero_state(B)
+
+# TT = max(len(h) for h in idx)
+# idx1 = torch.full((B, TT), 0, dtype=torch.long, device="cuda")
+# Tm = torch.zeros(B, dtype=torch.int, device="cuda")
+# for i in range(B):
+#     t = TT - len(idx[i])
+#     Tm[i] = t
+#     idx1[i, t:] = torch.tensor(idx[i], dtype=torch.long, device="cuda")
+# lens = torch.tensor([len(z) for z in tokens], dtype=torch.int32, device="cuda")
+
+# # att_mask = (torch.arange(TT, device="cuda") < Tm.unsqueeze(1)).unsqueeze(-1)
+# # return self.forward_prefill(B, idx1, state, att_mask=att_mask, full_output=full_output)
+
+
+# init_outs = model.forward_seq_batch_right(idx1, state, lens)
 # for n in range(len(prompts)):
 #     print(prompts[n])
 #     init_out = init_outs[n]
@@ -101,52 +118,53 @@ def xprint(s):
 #         print(repr(token), f'[probability {token_prob:.2%}]')
 #     if n != len(prompts)-1:
 #         print()
+# exit(0)
 
 ########################################################################################################
 
-# from torch.profiler import schedule
-# from torch.profiler import profile, ProfilerActivity, record_function
-# # my_schedule = schedule(skip_first=1, wait=1, warmup=1, active=1)
-# xprint("Decode")
+from torch.profiler import schedule
+from torch.profiler import profile, ProfilerActivity, record_function
+# my_schedule = schedule(skip_first=1, wait=1, warmup=1, active=1)
+xprint("Decode")
 
 
 
-# prompt = "User: simulate SpaceX mars landing using python\n\nAssistant: <think"
-# LENGTH_PER_TRIAL = 256
-# TEMPERATURE = 1.0
-# TOP_P = 0.0
-# print(prompt, end="")
+prompt = "User: simulate SpaceX mars landing using python\n\nAssistant: <think"
+LENGTH_PER_TRIAL = 256
+TEMPERATURE = 1.0
+TOP_P = 0.0
+print(prompt, end="")
 
-# all_tokens = []
-# out_last = 0
-# state = model.generate_zero_state(0)
-# out = model.forward(tokenizer.encode(prompt), state)
+all_tokens = []
+out_last = 0
+state = model.generate_zero_state(0)
+out = model.forward(tokenizer.encode(prompt), state)
 
-# times = []
-# all_times = []
-# t000 = time.perf_counter()
+times = []
+all_times = []
+t000 = time.perf_counter()
 
 
-# for i in range(LENGTH_PER_TRIAL):
-#     t00 = time.perf_counter()
-#     token = sampler_simple(out, noise=0).item()
-#     all_tokens += [token]
-#     try:
-#         tmp = tokenizer.decode(all_tokens[out_last:], utf8_errors="strict")
-#         print(tmp, end="", flush=True) # only print when we have a valid utf-8 string
-#         out_last = i+1
-#     except:
-#         pass
-#     torch.cuda.synchronize()
-#     t0 = time.perf_counter()
-#     out = model.forward(token, state)
-#     torch.cuda.synchronize()
-#     t1 = time.perf_counter()
-#     times.append(t1 - t0)
-#     all_times.append(t1 - t00)
-# times = np.percentile(times, SHOW_SPEED_PERCENTILE)
-# all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
-# print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
+for i in range(LENGTH_PER_TRIAL):
+    t00 = time.perf_counter()
+    token = sampler_simple(out, noise=0).item()
+    all_tokens += [token]
+    try:
+        tmp = tokenizer.decode(all_tokens[out_last:], utf8_errors="strict")
+        print(tmp, end="", flush=True) # only print when we have a valid utf-8 string
+        out_last = i+1
+    except:
+        pass
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    out = model.forward(token, state)
+    torch.cuda.synchronize()
+    t1 = time.perf_counter()
+    times.append(t1 - t0)
+    all_times.append(t1 - t00)
+times = np.percentile(times, SHOW_SPEED_PERCENTILE)
+all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
+print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
 
 
 # LENGTH_PER_TRIAL = 8
@@ -186,67 +204,67 @@ def xprint(s):
 # xprint("Decode (CUDAGraph)")
 
 
-# prompt = "User: simulate SpaceX mars landing using python\n\nAssistant: <think"
-# LENGTH_PER_TRIAL = 256
-# TEMPERATURE = 1.0
-# TOP_P = 0.0
-# print(prompt, end="")
+prompt = "User: simulate SpaceX mars landing using python\n\nAssistant: <think"
+LENGTH_PER_TRIAL = 256
+TEMPERATURE = 1.0
+TOP_P = 0.0
+print(prompt, end="")
 
-# all_tokens = []
-# out_last = 0
-# state = model.generate_zero_state(0)
-# out = model.forward(tokenizer.encode(prompt), state)
-# token = sampler_simple(out, noise=0).item()
+all_tokens = []
+out_last = 0
+state = model.generate_zero_state(0)
+out = model.forward(tokenizer.encode(prompt), state)
+token = sampler_simple(out, noise=0).item()
 
-# x = model.z['emb.weight'][token]
+x = model.z['emb.weight'][token]
 
-# static_input = torch.empty_like(x, device="cuda")
-# static_state = copy.deepcopy(state)
-# # static_state = [None, None, None]
-# # static_state[0] = torch.empty_like(state[0], device="cuda")
-# # static_state[1] = torch.empty_like(state[1], device="cuda")
-# # static_state[2] = torch.empty_like(state[2], device="cuda")
-# static_output = torch.empty_like(out, device="cuda")
+static_input = torch.empty_like(x, device="cuda")
+static_state = copy.deepcopy(state)
+# static_state = [None, None, None]
+# static_state[0] = torch.empty_like(state[0], device="cuda")
+# static_state[1] = torch.empty_like(state[1], device="cuda")
+# static_state[2] = torch.empty_like(state[2], device="cuda")
+static_output = torch.empty_like(out, device="cuda")
 
-# static_output = model.forward(static_input, static_state)
+static_output = model.forward(static_input, static_state)
 
-# g = torch.cuda.CUDAGraph()
-# with torch.cuda.graph(g):
-#     static_output = model.forward(static_input, static_state)
+g = torch.cuda.CUDAGraph()
+with torch.cuda.graph(g):
+    static_output = model.forward(static_input, static_state)
 
-# static_input.copy_(x)
-# for i in range(len(state)):
-#     static_state[i].copy_(state[i])
-# static_output.copy_(out)
+static_input.copy_(x)
+for i in range(len(state)):
+    static_state[i].copy_(state[i])
+static_output.copy_(out)
 
-# times = []
-# all_times = []
-# t000 = time.perf_counter()
-# for i in range(0, LENGTH_PER_TRIAL):
-#     t00 = time.perf_counter()
-#     token = sampler_simple(static_output, noise=0).item()
-#     all_tokens += [token]
-#     try:
-#         tmp = tokenizer.decode(all_tokens[out_last:], utf8_errors="strict")
-#         print(tmp, end="", flush=True) # only print when we have a valid utf-8 string
-#         out_last = i+1
-#     except:
-#         pass
+times = []
+all_times = []
+t000 = time.perf_counter()
+for i in range(0, LENGTH_PER_TRIAL):
+    t00 = time.perf_counter()
+    token = sampler_simple(static_output, noise=0).item()
+    all_tokens += [token]
+    try:
+        tmp = tokenizer.decode(all_tokens[out_last:], utf8_errors="strict")
+        print(tmp, end="", flush=True) # only print when we have a valid utf-8 string
+        out_last = i+1
+    except:
+        pass
 
-#     static_input.copy_(model.z['emb.weight'][token])
+    static_input.copy_(model.z['emb.weight'][token])
 
-#     torch.cuda.synchronize()
-#     t0 = time.perf_counter()
-#     g.replay()
-#     torch.cuda.synchronize()
-#     t1 = time.perf_counter()
-#     times.append(t1 - t0)
-#     all_times.append(t1 - t00)
-# times = np.percentile(times, SHOW_SPEED_PERCENTILE)
-# all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
-# print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    g.replay()
+    torch.cuda.synchronize()
+    t1 = time.perf_counter()
+    times.append(t1 - t0)
+    all_times.append(t1 - t00)
+times = np.percentile(times, SHOW_SPEED_PERCENTILE)
+all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
+print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
 
-# exit(0)
+exit(0)
 #######################################################################################################
 
 xprint("Decode (batch)")
