@@ -127,8 +127,6 @@ from torch.profiler import profile, ProfilerActivity, record_function
 # my_schedule = schedule(skip_first=1, wait=1, warmup=1, active=1)
 xprint("Decode")
 
-
-
 prompt = "User: simulate SpaceX mars landing using python\n\nAssistant: <think"
 LENGTH_PER_TRIAL = 256
 TEMPERATURE = 1.0
@@ -139,6 +137,7 @@ all_tokens = []
 out_last = 0
 state = model.generate_zero_state(0)
 out = model.forward(tokenizer.encode(prompt), state)
+token = sampler_simple(out, noise=0).item()
 
 times = []
 all_times = []
@@ -147,7 +146,6 @@ t000 = time.perf_counter()
 
 for i in range(LENGTH_PER_TRIAL):
     t00 = time.perf_counter()
-    token = sampler_simple(out, noise=0).item()
     all_tokens += [token]
     try:
         tmp = tokenizer.decode(all_tokens[out_last:], utf8_errors="strict")
@@ -157,11 +155,12 @@ for i in range(LENGTH_PER_TRIAL):
         pass
     torch.cuda.synchronize()
     t0 = time.perf_counter()
-    out = model.forward(token, state)
+    out = model.forward(token, state, with_sampling=True)
     torch.cuda.synchronize()
     t1 = time.perf_counter()
     times.append(t1 - t0)
     all_times.append(t1 - t00)
+    token = out.item()
 times = np.percentile(times, SHOW_SPEED_PERCENTILE)
 all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
 print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
@@ -178,7 +177,7 @@ print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full
 # ) as p:
 #     for i in range(LENGTH_PER_TRIAL):
 #         # t00 = time.perf_counter()
-#         token = sampler_simple(out, noise=0).item()
+#         # token = sampler_simple(out, noise=0).item()
 #         all_tokens += [token]
 #         try:
 #             tmp = tokenizer.decode(all_tokens[out_last:], utf8_errors="strict")
@@ -188,7 +187,8 @@ print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full
 #             pass
 #         # torch.cuda.synchronize()
 #         # t0 = time.perf_counter()
-#         out = model.forward(token, state)
+#         out = model.forward(token, state, with_sampling=True)
+#         token = out.item()
 #         p.step()
 #         # torch.cuda.synchronize()
 #         # t1 = time.perf_counter()
@@ -197,12 +197,11 @@ print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full
 # # times = np.percentile(times, SHOW_SPEED_PERCENTILE)
 # # all_times = np.percentile(all_times, SHOW_SPEED_PERCENTILE)
 # # print(f'\n\nToken/s = {round(1/times,2)} (forward), {round(1/all_times,2)} (full) || Bandwidth = {round(active_GB/times,2)} GB/s || {round(time.perf_counter()-t000,3)}s')
-# p.export_chrome_trace("trace_ffn_cuda.json")
+# p.export_chrome_trace("trace_sampling.json")
 # exit(0)
 #######################################################################################################
 
-# xprint("Decode (CUDAGraph)")
-
+xprint("Decode (CUDAGraph)")
 
 prompt = "User: simulate SpaceX mars landing using python\n\nAssistant: <think"
 LENGTH_PER_TRIAL = 256
@@ -215,6 +214,7 @@ out_last = 0
 state = model.generate_zero_state(0)
 out = model.forward(tokenizer.encode(prompt), state)
 token = sampler_simple(out, noise=0).item()
+# token = model.forward(tokenizer.encode(prompt), state, with_sampling=True)
 
 x = model.z['emb.weight'][token]
 
@@ -224,25 +224,26 @@ static_state = copy.deepcopy(state)
 # static_state[0] = torch.empty_like(state[0], device="cuda")
 # static_state[1] = torch.empty_like(state[1], device="cuda")
 # static_state[2] = torch.empty_like(state[2], device="cuda")
-static_output = torch.empty_like(out, device="cuda")
-
-static_output = model.forward(static_input, static_state)
+static_output = torch.empty((1,), dtype=torch.int32, requires_grad=False, device="cuda")
+static_output = model.forward(static_input, static_state, with_sampling=True)
 
 g = torch.cuda.CUDAGraph()
 with torch.cuda.graph(g):
-    static_output = model.forward(static_input, static_state)
+    static_output = model.forward(static_input, static_state, with_sampling=True)
 
 static_input.copy_(x)
 for i in range(len(state)):
     static_state[i].copy_(state[i])
-static_output.copy_(out)
+# static_output.copy_(out)
+static_output[0] = token
 
 times = []
 all_times = []
 t000 = time.perf_counter()
 for i in range(0, LENGTH_PER_TRIAL):
     t00 = time.perf_counter()
-    token = sampler_simple(static_output, noise=0).item()
+    # token = sampler_simple(static_output, noise=0).item()
+    token = static_output.item()
     all_tokens += [token]
     try:
         tmp = tokenizer.decode(all_tokens[out_last:], utf8_errors="strict")

@@ -40,8 +40,36 @@ HEAD_SIZE = 64
 
 from torch.utils.cpp_extension import load
 
-load(name="rwkv7_state_fwd_fp16", sources=[f"{current_path}/cuda/rwkv7_state_fwd_fp16.cpp", f"{current_path}/cuda/rwkv7_state_fwd_fp16.cu"], is_python_module=False,
-                    verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}", "-gencode=arch=compute_120,code=sm_120"] + (["-Xptxas -O3"] if os.name != "nt" else []))
+# sm_X, sm_Y = torch.cuda.get_device_capability()
+load(
+    name="rwkv7_state_fwd_fp16", 
+    sources=[f"{current_path}/cuda/rwkv7_state_fwd_fp16.cpp", f"{current_path}/cuda/rwkv7_state_fwd_fp16.cu"], 
+    is_python_module=False,
+    verbose=True, 
+    extra_cuda_cflags=[
+        "-res-usage", 
+        "--use_fast_math", 
+        "-O3", 
+        "--extra-device-vectorization", 
+        f"-D_N_={HEAD_SIZE}", 
+        # f"-gencode=arch=compute_{sm_X}{sm_Y},code=sm_{sm_X}{sm_Y}"
+    ] + (
+        ["-Xptxas -O3"] if os.name != "nt" else []
+    )
+)
+
+class SAMPLING(torch.autograd.Function):
+    def forward(ctx, logits, penalties, states, presence_penalty, repetition_penalty, penalty_decay, temperature, top_k, top_p):
+        return torch.ops.rwkv7_state_fwd_fp16.batch_sampling_repetition_temperature_topk_topp(logits, penalties, states, presence_penalty, repetition_penalty, penalty_decay, temperature, top_k, top_p)
+@torch.library.custom_op("mylib::sampling", mutates_args=("penalties","states"))
+def Sampling(logits:torch.Tensor, penalties:torch.Tensor, states:torch.Tensor, presence_penalty:float=0.0, repetition_penalty:float=0.0, penalty_decay:float=0.0, temperature:float=1.0, top_k:int=-1, top_p:float=0.0) -> torch.Tensor:
+    return SAMPLING.apply(logits, penalties, states, presence_penalty, repetition_penalty, penalty_decay, temperature, top_k, top_p)
+@Sampling.register_fake
+def _(logits:torch.Tensor, penalties:torch.Tensor, states:torch.Tensor, presence_penalty:float=0.0, repetition_penalty:float=0.0, penalty_decay:float=0.0, temperature:float=1.0, top_k:int=-1, top_p:float=0.0) -> torch.Tensor:
+    V = logits.size(-1)
+    B = penalties.size(0) if (penalties.dim() == 2) else 1
+    T = logits.size(1) if (logits.dim() == 3) else 1
+    return torch.empty((B,), dtype=torch.int32, device=penalties.device)
 
 class CMIXONE(torch.autograd.Function):
     def forward(ctx, x, x_1, x_k, K, V):
@@ -130,13 +158,12 @@ def RWKV7_BATCH_OP(state:torch.Tensor, r:torch.Tensor, w:torch.Tensor, k:torch.T
 def _(state:torch.Tensor, r:torch.Tensor, w:torch.Tensor, k:torch.Tensor, v:torch.Tensor, a:torch.Tensor, b:torch.Tensor, elapsed_t:torch.Tensor) -> torch.Tensor:
     return torch.empty_like(r)
 
-
-
 class RWKV_x070(MyModule):
     def __init__(self, args):
         super().__init__()
-        self.args = args
+        args.vocab_size = 65536
         args.head_size = 64
+        self.args = args
         self.eval()
         
         self.z = torch.load(args.MODEL_NAME + '.pth', map_location='cpu')
@@ -170,33 +197,38 @@ class RWKV_x070(MyModule):
         z['blocks.0.att.v2'] = z['blocks.0.att.a2'] # actually ignored
 
     def generate_zero_state(self, bsz=0):
-        state = [None for _ in range(self.n_layer * 3 + 1)]
         if bsz == 0:
+            state = [None for _ in range(self.n_layer * 3 + 3)]
             state[self.n_layer*3] = torch.zeros((), dtype=torch.int32, requires_grad=False, device="cuda")
+            state[self.n_layer*3+2] = torch.ops.rwkv7_state_fwd_fp16.setup_rand(42, 1)
+            state[self.n_layer*3+1] = torch.zeros((self.args.vocab_size,), dtype=torch.float32, requires_grad=False, device="cuda")
             for i in range(self.n_layer): # state: 0=att_x_prev 1=att_kv 2=ffn_x_prev
                 state[i*3+0] = torch.zeros(self.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
                 state[i*3+1] = torch.zeros((self.n_embd // self.head_size, self.head_size, self.head_size), dtype=DTYPE, requires_grad=False, device="cuda")
                 state[i*3+2] = torch.zeros(self.n_embd, dtype=DTYPE, requires_grad=False, device="cuda")
         else:
+            state = [None for _ in range(self.n_layer * 3 + 1)]
             state[self.n_layer*3] = torch.zeros((), dtype=torch.int32, requires_grad=False, device="cuda")
+            # state[self.n_layer*3+1] = 
+            # state[self.n_layer*3+2] = torch.ops.rwkv7_state_fwd_fp16.setup_rand(42, bsz)
             for i in range(self.n_layer): # state: 0=att_x_prev 1=att_kv 2=ffn_x_prev
                 state[i*3+0] = torch.zeros((bsz, self.n_embd), dtype=DTYPE, requires_grad=False, device="cuda")
                 state[i*3+1] = torch.zeros((bsz, self.n_embd // self.head_size, self.head_size, self.head_size), dtype=DTYPE, requires_grad=False, device="cuda")
                 state[i*3+2] = torch.zeros((bsz, self.n_embd), dtype=DTYPE, requires_grad=False, device="cuda")
         return state
 
-    def forward(self, idx, state, full_output=False): # will modify state in-place
+    def forward(self, idx, state, full_output=False, with_sampling=False): # will modify state in-place
         if type(idx) is list:
             if len(idx) > 1:
                 return self.forward_seq(torch.tensor(idx), state, full_output)
             else:
                 x = self.z['emb.weight'][idx[0]]
-                return self.forward_one(x, state)
+                return self.forward_one(x, state, with_sampling)
         elif type(idx) is torch.Tensor:
-            return self.forward_one(idx, state)
+            return self.forward_one(idx, state, with_sampling)
         else:
             x = self.z['emb.weight'][idx]
-            return self.forward_one(x, state)
+            return self.forward_one(x, state, with_sampling)
         
     def forward_batch(self, tokens, state, full_output=False): # will modify state in-place
         assert type(tokens) is list
@@ -213,7 +245,7 @@ class RWKV_x070(MyModule):
         return self.forward_seq_batch(tokens, state, full_output)
 
     @MyFunction
-    def forward_one(self, x:torch.Tensor, state:List[torch.Tensor]):
+    def forward_one(self, x:torch.Tensor, state:List[torch.Tensor], with_sampling:bool=False):
         with torch.no_grad(): 
             z = self.z
             v_first = torch.empty_like(x)
@@ -238,8 +270,12 @@ class RWKV_x070(MyModule):
             
             x = F.layer_norm(x, (self.n_embd,), weight=z['ln_out.weight'], bias=z['ln_out.bias'])
             x = F.linear(x, z['head.weight'])
-            # state[2] += 1
             state[3*self.n_layer] += 1
+            if with_sampling:
+                y = Sampling(x.to(torch.float32), state[self.n_layer*3+1], state[self.n_layer*3+2])
+                # print("x:", x)
+                # breakpoint()
+                return y
             return x
         
     @MyFunction
