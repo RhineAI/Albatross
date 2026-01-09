@@ -20,19 +20,17 @@ tokenizer = TRIE_TOKENIZER("reference/rwkv_vocab_v20230424.txt")
 # ================= 核心任务 =================
 
 # 1. 定义前文 (Context)
-context = "1+3="
+context = "1"
 print(f"Input: '{context}'")
 
 # 2. 编码 (Encoding)
 input_tokens = tokenizer.encode(context)
 
 # 3. 初始化状态 (State)
-# Batch Size = 1
-state = model.generate_zero_state(1)
+state = model.generate_zero_state(0)
 
 # 4. 推理 (Inference)
-out_batch = model.forward_batch([input_tokens], state)
-logits = out_batch[0]
+logits = model.forward(input_tokens, state)
 
 # 5. 获取下一个 Token
 probs = F.softmax(logits.float(), dim=-1)
