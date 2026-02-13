@@ -26,7 +26,9 @@ def print_information(name = None, value = None):
     if not enable_print:
         return
     if name == None and value == None:
-        print('=' * 20)
+        return
+    if value == None:
+        print(f"--- {name} ---")
         return
     dtype_mapping = {
         torch.float16: "FP16", torch.float32: "FP32", torch.float64: "FP64", torch.bfloat16: "BF16",
@@ -64,6 +66,17 @@ def _wkv7_core(state, r, w, k, v, a, b):
     """
     # r,w,k,v,a,b: [H, N] fp32
     H, N = r.shape
+    print_information('START _wkv7_core')
+    print_information('H', H)
+    print_information('N', N)
+    print_information('r (input fp16)', r)
+    print_information('w (input fp16)', w)
+    print_information('k (input fp16)', k)
+    print_information('v (input fp16)', v)
+    print_information('a (input fp16)', a)
+    print_information('b (input fp16)', b)
+    print_information('state (input fp32)', state)
+
     r = r.float()
     k = k.float()
     v = v.float()
@@ -71,20 +84,27 @@ def _wkv7_core(state, r, w, k, v, a, b):
     b = b.float()
     # w transform: exp(-exp(-0.5) * w), w is already sigmoid'd from caller
     w = torch.exp(-EXP_NEG_HALF * w.float())  # [H, N]
+    print_information('w (after exp transform)', w)
 
     # sa[h,i] = sum_j a[h,j] * state[h,i,j]  =>  sa = (state @ a.unsqueeze(-1)).squeeze(-1)  [H,N]
     # but actually sa is the same for all rows i within a head: sa[h] = sum_j a[h,j] * state[h,i,j]
     # Wait - re-reading the kernel: each thread i has state[j] = state[i][j]. sa = sum_j a[j]*state[i][j].
     # So sa is PER ROW: sa[h,i] = sum_j(a[h,j] * state[h,i,j])
     sa = torch.einsum('hn,hin->hi', a, state)  # [H, N_rows] = [H, N]
+    print_information('sa (a @ state)', sa)
 
     # state[h,i,j] = state[h,i,j] * w[h,j] + k[h,j] * v[h,i] + sa[h,i] * b[h,j]
     state.mul_(w.unsqueeze(1))  # state[h,i,j] *= w[h,j]
+    print_information('state (after *w)', state)
     state.add_(k.unsqueeze(1) * v.unsqueeze(2))  # + k[h,j] * v[h,i]
+    print_information('state (after +kv)', state)
     state.add_(sa.unsqueeze(2) * b.unsqueeze(1))  # + sa[h,i] * b[h,j]
+    print_information('state (after +sa*b)', state)
 
     # y[h,i] = sum_j(state[h,i,j] * r[h,j])
     y = torch.einsum('hin,hn->hi', state, r)  # [H, N]
+    print_information('y (output)', y)
+    print_information('END _wkv7_core')
     return y.to(DTYPE)
 
 def RWKV7_ONE_OP(state, r, w, k, v, a, b):
@@ -93,13 +113,27 @@ def RWKV7_ONE_OP(state, r, w, k, v, a, b):
         C = r.shape[0]
         H = C // HEAD_SIZE
         N = HEAD_SIZE
+        print_information('START RWKV7_ONE_OP')
+        print_information('C (channels)', C)
+        print_information('H (heads)', H)
+        print_information('N (head_size)', N)
         r_ = r.view(H, N)
         w_ = w.view(H, N)
         k_ = k.view(H, N)
         v_ = v.view(H, N)
         a_ = a.view(H, N)
         b_ = b.view(H, N)
+        print_information('r_ (reshaped)', r_)
+        print_information('w_ (reshaped)', w_)
+        print_information('k_ (reshaped)', k_)
+        print_information('v_ (reshaped)', v_)
+        print_information('a_ (reshaped)', a_)
+        print_information('b_ (reshaped)', b_)
+        print_information('state (input)', state)
         y = _wkv7_core(state, r_, w_, k_, v_, a_, b_)
+        print_information('y (wkv7_core output)', y)
+        print_information('state (after wkv7_core)', state)
+        print_information('END RWKV7_ONE_OP')
         return y.view(C)
 
 def RWKV7_OP(state, r, w, k, v, a, b):
@@ -225,12 +259,9 @@ class RWKV_x070(torch.nn.Module):
             z = self.z
             x = z['emb.weight'][idx]
 
-            print_information()
             print_information('Hidden Size', x)
             print_information('Layer Number', self.n_layer)
-            print_information()
             print_information('Embedding Weight', z['emb.weight'])
-            print_information()
 
 
             v_first = torch.empty_like(x)
@@ -247,11 +278,9 @@ class RWKV_x070(torch.nn.Module):
                 print_information('Layer Norm 1 Input', x)
                 xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln1.weight'], bias=z[bbb+'ln1.bias'])
                 print_information('Layer Norm 1 Output', xx)
-                print_information()
 
                 print_information('Head Number', self.n_head)
                 print_information('Head Size', self.head_size)
-                print_information()
                 xx, v_first = RWKV_x070_TMix_one(
                     i, self.n_head, self.head_size, xx, state[0][i], v_first, state[1][i],
                     z[att+'x_r'], z[att+'x_w'], z[att+'x_k'], z[att+'x_v'], z[att+'x_a'], z[att+'x_g'],
@@ -261,14 +290,27 @@ class RWKV_x070(torch.nn.Module):
                     z[att+'ln_x.weight'], z[att+'ln_x.bias']
                 )
                 x = x + xx
+                print_information('x (after TMix residual)', x)
 
+                print_information('Layer Norm 2 Weight', z[bbb+'ln2.weight'])
+                print_information('Layer Norm 2 Bias', z[bbb+'ln2.bias'])
                 xx = F.layer_norm(x, (self.n_embd,), weight=z[bbb+'ln2.weight'], bias=z[bbb+'ln2.bias'])
+                print_information('Layer Norm 2 Output', xx)
 
                 xx = RWKV_x070_CMix_one(xx, state[0][i], z[ffn+'x_k'], z[ffn+'key.weight'], z[ffn+'value.weight'])
                 x = x + xx
-            
+                print_information('x (after CMix residual)', x)
+
+            enable_print = True
+            print_information('START Final Output')
+            print_information('ln_out.weight', z['ln_out.weight'])
+            print_information('ln_out.bias', z['ln_out.bias'])
             x = F.layer_norm(x, (self.n_embd,), weight=z['ln_out.weight'], bias=z['ln_out.bias'])
+            print_information('x (after final LN)', x)
+            print_information('head.weight', z['head.weight'])
             x = x @ z['head.weight']
+            print_information('logits', x)
+            print_information('END Final Output')
             return x
         
     
@@ -410,7 +452,6 @@ def RWKV_x070_TMix_one(
     print_information('x', x)
     print_information('x_prev', x_prev[0])
     print_information('xx', xx)
-    print_information()
 
     xr, xw, xk, xv, xa, xg = x+xx*x_r, x+xx*x_w, x+xx*x_k, x+xx*x_v, x+xx*x_a, x+xx*x_g
 
@@ -419,14 +460,12 @@ def RWKV_x070_TMix_one(
     print_information('g1', g1)
     print_information('g2', g2)
     print_information('g', g)
-    print_information()
 
     r = xr @ R_
     print_information('x_r', x_r)
     print_information('xr', xr)
     print_information('R_', R_)
     print_information('r', r)
-    print_information()
 
     w = torch.tanh(xw @ w1) @ w2
     w = torch.sigmoid(w0 + w) # !!! here we are using different w !!!
@@ -435,21 +474,18 @@ def RWKV_x070_TMix_one(
     print_information('w1', w1)
     print_information('w2', w2)
     print_information('w', w)
-    print_information()
 
     k = xk @ K_
     print_information('x_k', x_k)
     print_information('xk', xk)
     print_information('K_', K_)
     print_information('k', k)
-    print_information()
 
     v = xv @ V_
     print_information('x_v', x_v)
     print_information('xv', xv)
     print_information('V_', V_)
     print_information('v', v)
-    print_information()
 
     a = torch.sigmoid(a0 + (xa @ a1) @ a2)
     print_information('x_a', x_a)
@@ -458,18 +494,49 @@ def RWKV_x070_TMix_one(
     print_information('a1', a1)
     print_information('a2', a2)
     print_information('a', a)
-    print_information()
 
     kk = F.normalize((k * k_k).view(H,N), dim=-1, p=2.0).view(H*N)
+    print_information('k_k', k_k)
+    print_information('kk (normalized)', kk)
+
     k = k * (1 + (a-1) * k_a)
+    print_information('k_a', k_a)
+    print_information('k (after k_a)', k)
+
     if layer_id == 0: v_first = v
     else: v = v + (v_first - v) * torch.sigmoid(v0 + (xv @ v1) @ v2)
+    print_information('v0', v0)
+    print_information('v1', v1)
+    print_information('v2', v2)
+    print_information('v_first', v_first)
+    print_information('v (after v_first mix)', v)
 
+    print_information('state (before wkv)', state)
+    print_information('RWKV7_ONE_OP inputs: r', r)
+    print_information('RWKV7_ONE_OP inputs: w', w)
+    print_information('RWKV7_ONE_OP inputs: k', k)
+    print_information('RWKV7_ONE_OP inputs: v', v)
+    print_information('RWKV7_ONE_OP inputs: -kk', -kk)
+    print_information('RWKV7_ONE_OP inputs: kk*a', kk*a)
     xx = RWKV7_ONE_OP(state, r, w, k, v, -kk, kk*a) # !!! using CUDA to modify state in-place !!! (faster too)
+    print_information('wkv output (xx)', xx)
+    print_information('state (after wkv)', state)
 
-    xx = F.group_norm(xx.view(1,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(H*N)    
-    xx = xx + ((r * k * r_k).view(H,N).sum(dim=-1, keepdim=True) * v.view(H,N)).view(H*N)
-    return (xx * g) @ O_, v_first
+    xx = F.group_norm(xx.view(1,H*N), num_groups=H, weight=ln_w, bias=ln_b, eps = 64e-5).view(H*N)
+    print_information('ln_w', ln_w)
+    print_information('ln_b', ln_b)
+    print_information('xx (after group_norm)', xx)
+
+    bonus = ((r * k * r_k).view(H,N).sum(dim=-1, keepdim=True) * v.view(H,N)).view(H*N)
+    print_information('r_k', r_k)
+    print_information('bonus (r*k*r_k aggregated)', bonus)
+    xx = xx + bonus
+    print_information('xx (after bonus)', xx)
+
+    print_information('O_', O_)
+    out = (xx * g) @ O_
+    print_information('TMix output', out)
+    return out, v_first
 
 
 def RWKV_x070_TMix_seq(layer_id: int, H:int, N:int, x, x_prev, v_first, state, x_r, x_w, x_k, x_v, x_a, x_g, w0, w1, w2, a0, a1, a2, v0, v1, v2, g1, g2, k_k, k_a, r_k, R_, K_, V_, O_, ln_w, ln_b):
@@ -527,11 +594,22 @@ def RWKV_x070_TMix_seq_batch(layer_id: int, H:int, N:int, x, x_prev, v_first, st
 
 
 def RWKV_x070_CMix_one(x, x_prev, x_k, K_, V_):
+    print_information('START CMix_one')
+    print_information('x (CMix input)', x)
     xx = x_prev[1] - x
     x_prev[1] = x
+    print_information('xx (CMix delta)', xx)
+    print_information('x_k', x_k)
     k = x + xx * x_k
+    print_information('k (before relu)', k)
+    print_information('K_', K_)
     k = torch.relu(k @ K_) ** 2
-    return k @ V_
+    print_information('k (after relu^2)', k)
+    print_information('V_', V_)
+    out = k @ V_
+    print_information('CMix output', out)
+    print_information('END CMix_one')
+    return out
 
 
 def RWKV_x070_CMix_seq(x, x_prev, x_k, K_, V_):
