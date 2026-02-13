@@ -6,7 +6,7 @@ from torch.nn import functional as F
 args = types.SimpleNamespace()
 args.vocab_size = 65536
 args.head_size = 64
-args.MODEL_NAME = "/root/models/rwkv7-g1a-0.1b-20250728-ctx4096"
+args.MODEL_NAME = "D:\\Development\\models\\rwkv\\rwkv7-g1d-0.1b-20260129-ctx8192"
 
 print(f'\nUsing CUDA fp16. Loading {args.MODEL_NAME} ...\n')
 
