@@ -5,9 +5,6 @@
 ########################################################################################################
 
 from typing import List
-import os
-current_path = os.path.dirname(os.path.abspath(__file__))
-
 import torch
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.allow_tf32 = True
@@ -22,7 +19,6 @@ DTYPE = torch.half
 
 ########################################################################################################
 
-from torch.utils.cpp_extension import load
 HEAD_SIZE = 64
 
 enable_print = True
@@ -32,91 +28,104 @@ def print_information(name = None, value = None):
     if name == None and value == None:
         print('=' * 20)
         return
-    # 定义类型到显示字符串的映射
     dtype_mapping = {
-        # PyTorch Dtypes
-        torch.float16: "FP16",
-        torch.float32: "FP32",
-        torch.float64: "FP64",
-        torch.bfloat16: "BF16",
-        torch.int8: "INT8",
-        torch.int32: "INT32",
-        torch.int64: "INT64",
-        torch.bool: "BOOL",
-
-        # Python Native Types (普通变量)
-        float: "FP32",  # Python float 默认为双精度，但在DL上下文中通常视为浮点数
-        int: "INT32",  # Python int 为任意精度，通常对应 INT32/64
-        bool: "BOOL"
+        torch.float16: "FP16", torch.float32: "FP32", torch.float64: "FP64", torch.bfloat16: "BF16",
+        torch.int8: "INT8", torch.int32: "INT32", torch.int64: "INT64", torch.bool: "BOOL",
+        float: "FP32", int: "INT32", bool: "BOOL"
     }
-
-    # 1. 判断是否为 PyTorch Tensor
     if torch.is_tensor(value):
-        # 获取映射后的 dtype 名称，如果没有在字典里则回退到原始名称
         dtype_str = dtype_mapping.get(value.dtype, str(value.dtype).replace('torch.', ''))
-        shape_list = list(value.shape)
-        print(f"{name}: {dtype_str} {shape_list}")
-
-    # 2. 判断是否为普通 Python 标量 (int, float, bool)
+        print(f"{name}: {dtype_str} {list(value.shape)}")
     elif isinstance(value, (int, float, bool)):
-        dtype_str = dtype_mapping.get(type(value), "UNKNOWN")
-        # 普通变量不打印 shape
-        print(f"{name}: {dtype_str}")
-
-    # 3. 其他情况 (list, numpy等)
+        print(f"{name}: {dtype_mapping.get(type(value), 'UNKNOWN')}")
     else:
-        # 这里可以根据需要扩展对 numpy 的支持
         print(f"{name}: {type(value).__name__} {list(value.shape) if hasattr(value, 'shape') else ''}")
 
-load(name="rwkv7_state_fwd_fp16", sources=[f"{current_path}/cuda/rwkv7_state_fwd_fp16.cpp", f"{current_path}/cuda/rwkv7_state_fwd_fp16.cu"], is_python_module=False,
-                    verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}"] + (["-Xptxas -O3"] if os.name != "nt" else []))
-class WKV_7(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, state, r, w, k, v, a, b):
-        with torch.no_grad():
-            T, C = r.size()
-            H = C // HEAD_SIZE
-            N = HEAD_SIZE
-            assert HEAD_SIZE == C // H
-            assert all(x.dtype == DTYPE for x in [r,w,k,v,a,b])
-            assert all(x.is_contiguous() for x in [r,w,k,v,a,b])
-            y = torch.empty((T, C), device=k.device, dtype=DTYPE, requires_grad=False, memory_format=torch.contiguous_format)
-            torch.ops.rwkv7_state_fwd_fp16.forward(1, T, C, H, state, r, w, k, v, a, b, y)
-            return y
-def RWKV7_OP(state, r, w, k, v, a, b):
-    return WKV_7.apply(state, r, w, k, v, a, b)
+import math
+EXP_NEG_HALF = math.exp(-0.5)  # 0.6065306597...
 
-class WKV_7_one(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, state, r, w, k, v, a, b):
-        with torch.no_grad():
-            C = r.shape[0]
-            H = C // HEAD_SIZE
-            N = HEAD_SIZE
-            assert HEAD_SIZE == C // H
-            assert all(x.dtype == DTYPE for x in [r,w,k,v,a,b])
-            assert all(x.is_contiguous() for x in [r,w,k,v,a,b])
-            y = torch.empty((C), device=k.device, dtype=DTYPE, requires_grad=False, memory_format=torch.contiguous_format)
-            torch.ops.rwkv7_state_fwd_fp16.forward(1, 1, C, H, state, r, w, k, v, a, b, y)
-            return y
+def _wkv7_core(state, r, w, k, v, a, b):
+    """
+    Pure PyTorch implementation matching the CUDA kernel exactly.
+    All internal computation in fp32. state is fp32 and modified in-place.
+    Inputs r,w,k,v,a,b are fp16, output is fp16.
+
+    state: [H, N, N] (fp32)
+    r, w, k, v, a, b: [H, N] per timestep (fp16 input)
+
+    CUDA kernel per head h, per row i (threadIdx.x):
+        state[j] loaded as fp32
+        for each timestep t:
+            sa = sum_j(a[j] * state[j])
+            state[j] = state[j] * w[j] + k[j] * v[i] + sa * b[j]   (i is the row)
+            y[i] = sum_j(state[j] * r[j])
+        Note: each thread i has its own state row state[i,:], and v[i] is the i-th element.
+              w, k, r, a, b are shared across all threads (all rows) within a head.
+    """
+    # r,w,k,v,a,b: [H, N] fp32
+    H, N = r.shape
+    r = r.float()
+    k = k.float()
+    v = v.float()
+    a = a.float()
+    b = b.float()
+    # w transform: exp(-exp(-0.5) * w), w is already sigmoid'd from caller
+    w = torch.exp(-EXP_NEG_HALF * w.float())  # [H, N]
+
+    # sa[h,i] = sum_j a[h,j] * state[h,i,j]  =>  sa = (state @ a.unsqueeze(-1)).squeeze(-1)  [H,N]
+    # but actually sa is the same for all rows i within a head: sa[h] = sum_j a[h,j] * state[h,i,j]
+    # Wait - re-reading the kernel: each thread i has state[j] = state[i][j]. sa = sum_j a[j]*state[i][j].
+    # So sa is PER ROW: sa[h,i] = sum_j(a[h,j] * state[h,i,j])
+    sa = torch.einsum('hn,hin->hi', a, state)  # [H, N_rows] = [H, N]
+
+    # state[h,i,j] = state[h,i,j] * w[h,j] + k[h,j] * v[h,i] + sa[h,i] * b[h,j]
+    state.mul_(w.unsqueeze(1))  # state[h,i,j] *= w[h,j]
+    state.add_(k.unsqueeze(1) * v.unsqueeze(2))  # + k[h,j] * v[h,i]
+    state.add_(sa.unsqueeze(2) * b.unsqueeze(1))  # + sa[h,i] * b[h,j]
+
+    # y[h,i] = sum_j(state[h,i,j] * r[h,j])
+    y = torch.einsum('hin,hn->hi', state, r)  # [H, N]
+    return y.to(DTYPE)
+
 def RWKV7_ONE_OP(state, r, w, k, v, a, b):
-    return WKV_7_one.apply(state, r, w, k, v, a, b)
+    """Single token: r,w,k,v,a,b are [C], state is [H,N,N] fp32"""
+    with torch.no_grad():
+        C = r.shape[0]
+        H = C // HEAD_SIZE
+        N = HEAD_SIZE
+        r_ = r.view(H, N)
+        w_ = w.view(H, N)
+        k_ = k.view(H, N)
+        v_ = v.view(H, N)
+        a_ = a.view(H, N)
+        b_ = b.view(H, N)
+        y = _wkv7_core(state, r_, w_, k_, v_, a_, b_)
+        return y.view(C)
 
-class WKV_7_batch(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, state, r, w, k, v, a, b):
-        with torch.no_grad():
-            B, T, C = r.size()
-            H = C // HEAD_SIZE
-            N = HEAD_SIZE
-            assert HEAD_SIZE == C // H
-            assert all(x.dtype == DTYPE for x in [r,w,k,v,a,b])
-            assert all(x.is_contiguous() for x in [r,w,k,v,a,b])
-            y = torch.empty((B, T, C), device=k.device, dtype=DTYPE, requires_grad=False, memory_format=torch.contiguous_format)
-            torch.ops.rwkv7_state_fwd_fp16.forward(B, T, C, H, state, r, w, k, v, a, b, y)
-            return y
+def RWKV7_OP(state, r, w, k, v, a, b):
+    """Sequence: r,w,k,v,a,b are [T,C], state is [H,N,N] fp32"""
+    with torch.no_grad():
+        T, C = r.shape
+        H = C // HEAD_SIZE
+        N = HEAD_SIZE
+        y = torch.empty((T, C), device=r.device, dtype=DTYPE)
+        for t in range(T):
+            y[t] = RWKV7_ONE_OP(state, r[t], w[t], k[t], v[t], a[t], b[t])
+        return y
+
 def RWKV7_BATCH_OP(state, r, w, k, v, a, b):
-    return WKV_7_batch.apply(state, r, w, k, v, a, b)
+    """Batch: r,w,k,v,a,b are [B,T,C], state is [B,H,N,N] fp32"""
+    with torch.no_grad():
+        B, T, C = r.shape
+        H = C // HEAD_SIZE
+        N = HEAD_SIZE
+        y = torch.empty((B, T, C), device=r.device, dtype=DTYPE)
+        for b_idx in range(B):
+            for t in range(T):
+                y[b_idx, t] = RWKV7_ONE_OP(
+                    state[b_idx], r[b_idx, t], w[b_idx, t], k[b_idx, t],
+                    v[b_idx, t], a[b_idx, t], b[b_idx, t])
+        return y
 
 ########################################################################################################
 
