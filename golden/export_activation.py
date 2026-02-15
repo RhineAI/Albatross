@@ -38,6 +38,12 @@ v_first = torch.empty_like(x)
 # ================= 导出 embedding =================
 TASK_EMB_DIR = os.path.join(GOLDEN_ROOT, "task0", "emb")
 os.makedirs(TASK_EMB_DIR, exist_ok=True)
+
+# token_id 是 int，单独写一行 hex
+with open(os.path.join(TASK_EMB_DIR, 'token_id.hex'), 'w') as f:
+    f.write(f"{token_id:08x}\n")
+print(f"  token_id.hex: 1 value (id={token_id})")
+
 save(TASK_EMB_DIR, 'emb.weight.out', x)
 
 # ================= 逐层计算 =================
