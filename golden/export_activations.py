@@ -1,15 +1,18 @@
 """
 RWKV7 全层逐级验证脚本 — 导出每步中间激活值。
 
-逐步计算每个中间结果，导出 hex 到 golden/task0/{emb,layer0,layer1,...,output}/。
+逐步计算每个中间结果，导出 hex 到 golden/token0/{emb,layer0,layer1,...,output}/。
 文件名不带 blocks.X 前缀（每层已有独立目录），用 .in/.out 表示部件的输入输出。
 最后输出 logits 并打印对应的 token。
 """
 
 import os
+import math
 import torch
 from torch.nn import functional as F
 from reference.rwkv7 import RWKV7_ONE_OP, DTYPE
+
+EXP_NEG_HALF = math.exp(-0.5)
 from reference.utils import TRIE_TOKENIZER
 from golden.utils import GOLDEN_ROOT, save, compare, load_model
 
@@ -36,7 +39,7 @@ x = z['emb.weight'][token_id]  # [C] fp16
 v_first = torch.empty_like(x)
 
 # ================= 导出 embedding =================
-TASK_EMB_DIR = os.path.join(GOLDEN_ROOT, "task0", "emb")
+TASK_EMB_DIR = os.path.join(GOLDEN_ROOT, "token0", "emb")
 os.makedirs(TASK_EMB_DIR, exist_ok=True)
 
 # token_id 是 int，单独写一行 hex
@@ -54,7 +57,7 @@ for layer_id in range(n_layer):
     ffn = f'blocks.{layer_id}.ffn.'
     FFN_DIM = z[ffn+'key.weight'].shape[1]
 
-    D = os.path.join(GOLDEN_ROOT, "task0", f"layer{layer_id}")
+    D = os.path.join(GOLDEN_ROOT, "token0", f"layer{layer_id}")
     os.makedirs(D, exist_ok=True)
 
     print(f"\n{'='*60}")
@@ -180,6 +183,9 @@ for layer_id in range(n_layer):
 
     save(D, 'att.wkv.in.r', r)
     save(D, 'att.wkv.in.w', w_decay)
+    # RTL head 接收的是 decay_lut 输出: exp(-exp(-0.5) * sigmoid(w_sum))
+    w_decay_rtl = torch.exp(-EXP_NEG_HALF * w_decay.float()).to(DTYPE)
+    save(D, 'att.wkv.in.w_decay', w_decay_rtl)
     save(D, 'att.wkv.in.k', k_mod)
     save(D, 'att.wkv.in.v', v)
     save(D, 'att.wkv.in.neg_kk', neg_kk)
@@ -261,7 +267,7 @@ print(f"\n{'='*60}")
 print("  Final Output")
 print(f"{'='*60}")
 
-TASK_OUT_DIR = os.path.join(GOLDEN_ROOT, "task0", "output")
+TASK_OUT_DIR = os.path.join(GOLDEN_ROOT, "token0", "output")
 os.makedirs(TASK_OUT_DIR, exist_ok=True)
 
 save(TASK_OUT_DIR, 'ln_out.in', x)
@@ -278,4 +284,4 @@ print(f"\nLogits shape: {list(logits.shape)}")
 print(f"Top token: id={top_id}, text='{top_token}'")
 compare("logits", logits)
 
-print(f"\nDone! Activation data exported to {GOLDEN_ROOT}/task0/")
+print(f"\nDone! Activation data exported to {GOLDEN_ROOT}/token0/")
