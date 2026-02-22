@@ -32,8 +32,8 @@ LAYER_ID = 0
 
 TILE_DIM = 32
 Q_BITS = 5
-Q_MAX = 31
-Q_MIN = 0
+Q_MAX = 15
+Q_MIN = -16
 
 EXP_NEG_HALF = math.exp(-0.5)
 
@@ -153,8 +153,128 @@ def dequantize_matrix(w_int, scale_w, min_w, rows, cols):
     return torch.from_numpy(W_recon).to(DTYPE)
 
 
+# ══════════════════════════════════════════════════════════════
+# 硬件级 tile VMM 模拟 (从 gen_rhine_vmm_v1_golden.py 移植)
+# 精确模拟 fp16_q5k_vmm32_tile 的完整流水线:
+#   1. fp16_q5k_vq: 输入向量量化 FP16 → INT5 + scale_x
+#   2. int_vmm: INT5 × INT5 整数矩阵乘
+#   3. fp16_q5k_vdq: 反量化 → FP16 输出
+# ══════════════════════════════════════════════════════════════
+
+def _uint16_to_fp16(val):
+    return np.uint16(val).view(np.float16)
+
+
+def _fp16_mul(a, b):
+    return np.float16(np.float64(a) * np.float64(b))
+
+
+def _fp16_add(a, b):
+    return np.float16(np.float64(a) + np.float64(b))
+
+
+def _fp16_recip(a):
+    if float(a) == 0.0:
+        return np.float16(0.0)
+    return np.float16(1.0 / np.float64(a))
+
+
+def _quantize_block(x_fp16_vec):
+    """模拟 fp16_q5k_vq: 对称量化输入向量 → INT5 + scale_x"""
+    abs_vals = np.abs(x_fp16_vec).astype(np.float16)
+    amax = np.float16(np.max(abs_vals))
+    if float(amax) == 0.0:
+        return np.zeros(TILE_DIM, dtype=np.int32), np.float16(0.0)
+
+    recip_amax = _fp16_recip(amax)
+    iscale = _fp16_mul(np.float16(15.0), recip_amax)
+    scale = _fp16_mul(amax, _uint16_to_fp16(0x2C44))  # amax * (1/15)
+
+    q_int = np.zeros(TILE_DIM, dtype=np.int32)
+    for i in range(TILE_DIM):
+        prod = _fp16_mul(x_fp16_vec[i], iscale)
+        prod_f = float(prod)
+        q_val = int(np.trunc(prod_f))
+        frac = prod_f - q_val
+        if frac > 0.5:
+            q_val += 1
+        elif frac < -0.5:
+            q_val -= 1
+        q_int[i] = max(-16, min(15, q_val))
+    return q_int, scale
+
+
+def _int_vmm(q_x, w_int):
+    """模拟 int_vmm: y[j] = Σ_i q_x[i] * w_int[i][j]"""
+    sumi = np.zeros(TILE_DIM, dtype=np.int64)
+    for j in range(TILE_DIM):
+        for i in range(TILE_DIM):
+            sumi[j] += int(q_x[i]) * int(w_int[i][j])
+    return sumi
+
+
+def _dequantize_output(sumi, q_x, scale_x, scale_w, min_w):
+    """模拟 fp16_q5k_vdq: 反量化整数累加结果 → FP16"""
+    sum_qx = int(np.sum(q_x.astype(np.int64)))
+    sum_qx_fp16 = np.float16(float(sum_qx))
+    sx_sum_qx = _fp16_mul(sum_qx_fp16, scale_x)
+
+    y = np.zeros(TILE_DIM, dtype=np.float16)
+    for j in range(TILE_DIM):
+        coeff_j = _fp16_mul(scale_x, scale_w[j])
+        bias_j = _fp16_mul(sx_sum_qx, min_w[j])
+        sumi_j_fp16 = np.float16(float(int(sumi[j])))
+        term_a = _fp16_mul(sumi_j_fp16, coeff_j)
+        y[j] = _fp16_add(term_a, bias_j)
+    return y
+
+
+def _tile_vmm(x_group_fp16, w_int, scale_w, min_w):
+    """模拟单个 fp16_q5k_vmm32_tile 的完整流水线"""
+    q_x, scale_x = _quantize_block(x_group_fp16)
+    sumi = _int_vmm(q_x, w_int)
+    return _dequantize_output(sumi, q_x, scale_x, scale_w, min_w)
+
+
+def _fp16_sum_tree(values):
+    """模拟 fp16_sum_tree: 二叉树逐级 FP16 加法"""
+    current = [np.float16(v) for v in values]
+    while len(current) > 1:
+        nxt = []
+        for k in range(0, len(current), 2):
+            if k + 1 < len(current):
+                nxt.append(_fp16_add(current[k], current[k + 1]))
+            else:
+                nxt.append(current[k])
+        current = nxt
+    return current[0]
+
+
+def hw_matmul(x_tensor, w_int, scale_w, min_w, rows, cols):
+    """硬件级矩阵向量乘: 精确模拟 tile 网格阵列。
+    x_tensor: [rows] FP16 torch tensor (输入向量)
+    w_int/scale_w/min_w: [tr][tc] 量化数据 (来自 quantize_matrix)
+    返回: [cols] FP16 torch tensor (输出向量)
+    """
+    tr = rows // TILE_DIM
+    tc = cols // TILE_DIM
+    x_np = x_tensor.detach().cpu().to(torch.float16).numpy()
+
+    y = np.zeros(cols, dtype=np.float16)
+    for gc in range(tc):
+        for gk in range(TILE_DIM):
+            col_vals = []
+            for gr in range(tr):
+                x_group = x_np[gr*TILE_DIM:(gr+1)*TILE_DIM]
+                tile_y = _tile_vmm(x_group, w_int[gr][gc], scale_w[gr][gc], min_w[gr][gc])
+                col_vals.append(tile_y[gk])
+            y[gc*TILE_DIM + gk] = _fp16_sum_tree(col_vals)
+
+    return torch.from_numpy(y).to(DTYPE)
+
+
 def quantize_and_save(out_dir, name, W_tensor, rows, cols):
-    """量化矩阵并导出, 返回 (量化数据, 反量化 tensor)。"""
+    """量化矩阵并导出, 返回 (量化数据, 反量化 tensor, hw_matmul 可用的量化数据)。"""
     W_np = W_tensor.detach().cpu().to(torch.float16).numpy()
     w_int, scale_w, min_w = quantize_matrix(W_np, name, rows, cols)
     tr, tc = rows // TILE_DIM, cols // TILE_DIM
@@ -617,14 +737,30 @@ def main():
     # Residual 2
     q5k_x_out = (q5k_x_after_att.float() + q5k_cmix_out.float()).to(DTYPE)
 
-    # 保存 Q5K golden data (覆盖 tmix_forward/cmix_forward 内部 save 的文件)
-    save(OUT_DIR, 'q5k.att.wkv.out', q5k_tmix_out)  # tmix_forward 已保存了 att.wkv.out, 这里用 q5k 前缀
+    # 保存 Q5K golden data — TMix 中间信号 (逐级调试用)
+    save(OUT_DIR, 'q5k.tmix.r', q5k_tmix_mid['r'])
+    save(OUT_DIR, 'q5k.tmix.k', q5k_tmix_mid['k'])
+    save(OUT_DIR, 'q5k.tmix.v', q5k_tmix_mid['v'])
+    save(OUT_DIR, 'q5k.tmix.w_sigmoid', q5k_tmix_mid['w_sigmoid'])
+    save(OUT_DIR, 'q5k.tmix.a_vec', q5k_tmix_mid['a_vec'])
+    save(OUT_DIR, 'q5k.tmix.g_vec', q5k_tmix_mid['g_vec'])
+    save(OUT_DIR, 'q5k.tmix.kk_norm', q5k_tmix_mid['kk_norm'])
+    save(OUT_DIR, 'q5k.tmix.k_mod', q5k_tmix_mid['k_mod'])
+    save(OUT_DIR, 'q5k.tmix.v_after_mix', q5k_tmix_mid['v_after_mix'])
+    save(OUT_DIR, 'q5k.tmix.gn_out', q5k_tmix_mid['gn_out'])
+    save(OUT_DIR, 'q5k.tmix.gated', q5k_tmix_mid['gated'])
+
+    # 保存 Q5K golden data — 最终输出
+    save(OUT_DIR, 'q5k.att.wkv.out', q5k_tmix_mid['wkv_out'])
     save(OUT_DIR, 'q5k.att.out', q5k_tmix_out)
     save(OUT_DIR, 'q5k.x_after_att', q5k_x_after_att)
     save(OUT_DIR, 'q5k.ln2.out', q5k_ln2_out)
     save(OUT_DIR, 'q5k.ffn.out', q5k_cmix_out)
     save(OUT_DIR, 'q5k.x_out', q5k_x_out)
     save(OUT_DIR, 'q5k.att_state.out', att_state_q5k)
+    save(OUT_DIR, 'q5k.tmix_x_prev.out', x_prev_q5k[0])
+    save(OUT_DIR, 'q5k.cmix_x_prev.out', x_prev_q5k[1])
+    save(OUT_DIR, 'q5k.v_first.out', q5k_v_first)
 
     # ================================================================
     # 误差对比: FP16 原始 vs Q5K 反量化 — 逐阶段
