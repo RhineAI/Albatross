@@ -185,13 +185,20 @@ def compute_metrics(a: torch.Tensor, b: torch.Tensor):
     nz = abs_b > 0
     mean_rel = float(np.mean(diff[nz] / abs_b[nz]) * 100.0) if np.any(nz) else 0.0
 
-    return cos_sim, max_abs, mean_rel
+    # 排除 |b| < threshold 的近零值后的 mean_rel
+    threshold = 0.1
+    sig = abs_b > threshold
+    mean_rel_sig = float(np.mean(diff[sig] / abs_b[sig]) * 100.0) if np.any(sig) else 0.0
+    n_small = int(np.sum(nz & ~sig))  # 非零但很小的值数量
+
+    return cos_sim, max_abs, mean_rel, mean_rel_sig, n_small
 
 
 def print_metrics(label: str, a: torch.Tensor, b: torch.Tensor):
     """打印误差指标, 格式与 RTL testbench 一致。"""
-    cos_sim, max_abs, mean_rel = compute_metrics(a, b)
-    print(f"  {label:35s} cos_sim={cos_sim:.10f}  max_abs={max_abs:.6e}  mean_rel={mean_rel:.4f}%")
+    cos_sim, max_abs, mean_rel, mean_rel_sig, n_small = compute_metrics(a, b)
+    print(f"  {label:35s} cos={cos_sim:.10f}  max_abs={max_abs:.6e}  "
+          f"mrel={mean_rel:.1f}%  mrel_sig={mean_rel_sig:.1f}%  n_small={n_small}")
     return cos_sim, max_abs, mean_rel
 
 
@@ -235,7 +242,8 @@ def tmix_forward(D, layer_id, x, x_prev, v_first, state,
                  g1, g2, k_k, k_a, r_k,
                  R_, K_, V_, O_,
                  ln_w, ln_b):
-    """TMix forward, 导出中间结果。"""
+    """TMix forward, 导出中间结果, 返回 (tmix_out, v_first, intermediates_dict)。"""
+    mid = {}
     # Stage 1: Delta Mix
     xx = x_prev[0] - x
     x_prev[0] = x
@@ -246,56 +254,73 @@ def tmix_forward(D, layer_id, x, x_prev, v_first, state,
     xv = x + xx * x_v
     xa = x + xx * x_a
     xg = x + xx * x_g
+    mid['xr'] = xr.clone(); mid['xw'] = xw.clone(); mid['xk'] = xk.clone()
+    mid['xv'] = xv.clone(); mid['xa'] = xa.clone(); mid['xg'] = xg.clone()
 
     # Stage 2: Projections
     r = xr @ R_
     k = xk @ K_
     v = xv @ V_
+    mid['r'] = r.clone(); mid['k'] = k.clone(); mid['v'] = v.clone()
 
     tw = xw @ w1
     ta = xa @ a1
     tv = xv @ v1
     tg = xg @ g1
+    mid['tw'] = tw.clone(); mid['ta'] = ta.clone()
+    mid['tv'] = tv.clone(); mid['tg'] = tg.clone()
 
     # Stage 3a: Decay
     tw_tanh = torch.tanh(tw)
     w_proj2 = tw_tanh @ w2
     w_sum = w0 + w_proj2
     w_sigmoid = torch.sigmoid(w_sum)
+    mid['tw_tanh'] = tw_tanh.clone(); mid['w_proj2'] = w_proj2.clone()
+    mid['w_sum'] = w_sum.clone(); mid['w_sigmoid'] = w_sigmoid.clone()
 
     # Stage 3b: Alpha
     a_proj2 = ta @ a2
     a_sum = a0 + a_proj2
     a_vec = torch.sigmoid(a_sum)
+    mid['a_proj2'] = a_proj2.clone(); mid['a_sum'] = a_sum.clone()
+    mid['a_vec'] = a_vec.clone()
 
     # Stage 3c: Gate
     tg_sig = torch.sigmoid(tg)
     g_vec = tg_sig @ g2
+    mid['tg_sig'] = tg_sig.clone(); mid['g_vec'] = g_vec.clone()
 
     # Stage 3d: V-first coeff
     v_proj2 = tv @ v2
     vf_sum = v0 + v_proj2
     vf_coeff = torch.sigmoid(vf_sum)
+    mid['v_proj2'] = v_proj2.clone(); mid['vf_sum'] = vf_sum.clone()
+    mid['vf_coeff'] = vf_coeff.clone()
 
     # Stage 4: Key norm + modulation
     kk_raw = k * k_k
     kk_norm = F.normalize(kk_raw.view(H, N), dim=-1, p=2.0).view(H * N)
+    mid['kk_raw'] = kk_raw.clone(); mid['kk_norm'] = kk_norm.clone()
 
     a_minus_1 = a_vec - 1.0
     scale = 1.0 + a_minus_1 * k_a
     k_mod = k * scale
+    mid['k_mod'] = k_mod.clone()
 
     # Stage 5: V-first mix
     if layer_id == 0:
         v_first = v.clone()
     else:
         v = v + (v_first - v) * vf_coeff
+    mid['v_after_mix'] = v.clone()
 
     # Stage 6: WKV7 core
     neg_kk = -kk_norm
     kk_alpha = kk_norm * a_vec
 
     wkv_out = RWKV7_ONE_OP(state, r, w_sigmoid, k_mod, v, neg_kk, kk_alpha)
+    mid['wkv_out'] = wkv_out.clone()
+    mid['state_after'] = state.clone()
     if D is not None:
         save(D, 'att.wkv.out', wkv_out)
         save(D, 'att_state.out', state)
@@ -305,18 +330,21 @@ def tmix_forward(D, layer_id, x, x_prev, v_first, state,
         wkv_out.view(1, H * N), num_groups=H,
         weight=ln_w, bias=ln_b, eps=64e-5
     ).view(H * N)
+    mid['gn_out'] = gn_out.clone()
 
     # Stage 8: Bonus
     bonus = ((r * k_mod * r_k).view(H, N).sum(dim=-1, keepdim=True) * v.view(H, N)).view(H * N)
     gn_plus_bonus = gn_out + bonus
+    mid['bonus'] = bonus.clone(); mid['gn_plus_bonus'] = gn_plus_bonus.clone()
 
     # Stage 9: Gate + O_ projection
     gated = gn_plus_bonus * g_vec
     tmix_out = gated @ O_
+    mid['gated'] = gated.clone(); mid['tmix_out'] = tmix_out.clone()
     if D is not None:
         save(D, 'att.out', tmix_out)
 
-    return tmix_out, v_first
+    return tmix_out, v_first, mid
 
 
 # ══════════════════════════════════════════════════════════════
@@ -324,20 +352,26 @@ def tmix_forward(D, layer_id, x, x_prev, v_first, state,
 # ══════════════════════════════════════════════════════════════
 
 def cmix_forward(D, x, x_prev, x_k, K_, V_):
-    """CMix forward, 导出中间结果。"""
+    """CMix forward, 导出中间结果, 返回 (out, intermediates_dict)。"""
+    mid = {}
     xx = x_prev[1] - x
     x_prev[1] = x
 
     k = x + xx * x_k
+    mid['k'] = k.clone()
 
     k_expanded = k @ K_
+    mid['k_expanded'] = k_expanded.clone()
+
     k_act = torch.relu(k_expanded) ** 2
+    mid['k_act'] = k_act.clone()
 
     out = k_act @ V_
+    mid['out'] = out.clone()
     if D is not None:
         save(D, 'ffn.out', out)
 
-    return out
+    return out, mid
 
 
 # ══════════════════════════════════════════════════════════════
@@ -497,7 +531,7 @@ def main():
     x_prev = [tmix_x_prev.clone(), cmix_x_prev.clone()]
     v_first = v_first_in.clone()
 
-    tmix_out, v_first = tmix_forward(
+    tmix_out, v_first, fp16_tmix_mid = tmix_forward(
         OUT_DIR, layer_id=LAYER_ID,
         x=ln1_out, x_prev=x_prev, v_first=v_first, state=att_state,
         x_r=att_x_r, x_w=att_x_w, x_k=att_x_k, x_v=att_x_v, x_a=att_x_a, x_g=att_x_g,
@@ -526,7 +560,7 @@ def main():
     # ================================================================
     # Forward: CMix
     # ================================================================
-    cmix_out = cmix_forward(OUT_DIR, ln2_out, x_prev, ffn_x_k, ffn_K, ffn_V)
+    cmix_out, fp16_cmix_mid = cmix_forward(OUT_DIR, ln2_out, x_prev, ffn_x_k, ffn_K, ffn_V)
 
     # ================================================================
     # Forward: Residual 2
@@ -557,7 +591,7 @@ def main():
     q5k_ln1_out = ln1_out  # 完全相同
 
     # TMix with Q5K weights
-    q5k_tmix_out, q5k_v_first = tmix_forward(
+    q5k_tmix_out, q5k_v_first, q5k_tmix_mid = tmix_forward(
         None, layer_id=LAYER_ID,
         x=q5k_ln1_out, x_prev=x_prev_q5k, v_first=v_first_q5k, state=att_state_q5k,
         x_r=att_x_r, x_w=att_x_w, x_k=att_x_k, x_v=att_x_v, x_a=att_x_a, x_g=att_x_g,
@@ -578,7 +612,7 @@ def main():
                                 weight=ln2_w.float(), bias=ln2_b.float()).to(DTYPE)
 
     # CMix with Q5K weights
-    q5k_cmix_out = cmix_forward(None, q5k_ln2_out, x_prev_q5k, ffn_x_k, ffn_K_dq, ffn_V_dq)
+    q5k_cmix_out, q5k_cmix_mid = cmix_forward(None, q5k_ln2_out, x_prev_q5k, ffn_x_k, ffn_K_dq, ffn_V_dq)
 
     # Residual 2
     q5k_x_out = (q5k_x_after_att.float() + q5k_cmix_out.float()).to(DTYPE)
@@ -593,15 +627,121 @@ def main():
     save(OUT_DIR, 'q5k.att_state.out', att_state_q5k)
 
     # ================================================================
-    # 误差对比: FP16 原始 vs Q5K 反量化
+    # 误差对比: FP16 原始 vs Q5K 反量化 — 逐阶段
     # ================================================================
     print("\n" + "=" * 60)
     print("Error Metrics: FP16 original vs Q5K dequantized")
     print("=" * 60)
-    print_metrics("TMix output", q5k_tmix_out, tmix_out)
+
+    # --- 权重反量化误差 ---
+    print("\n--- Weight dequantization error ---")
+    for wname, w_orig, w_dq in [
+        ('R_', R_, R_dq), ('K_', K_, K_dq), ('V_', V_, V_dq), ('O_', O_, O_dq),
+        ('w1', w1, w1_dq), ('w2', w2, w2_dq),
+        ('a1', a1, a1_dq), ('a2', a2, a2_dq),
+        ('v1', v1, v1_dq), ('v2', v2, v2_dq),
+        ('g1', g1, g1_dq), ('g2', g2, g2_dq),
+        ('ffn_K', ffn_K, ffn_K_dq), ('ffn_V', ffn_V, ffn_V_dq),
+    ]:
+        print_metrics(f"weight {wname}", w_dq, w_orig)
+
+    # --- TMix 中间值逐步对比 ---
+    print("\n--- TMix stage-by-stage ---")
+    tmix_stages = [
+        'xr', 'xw', 'xk', 'xv', 'xa', 'xg',
+        'r', 'k', 'v',
+        'tw', 'ta', 'tv', 'tg',
+        'tw_tanh', 'w_proj2', 'w_sum', 'w_sigmoid',
+        'a_proj2', 'a_sum', 'a_vec',
+        'tg_sig', 'g_vec',
+        'v_proj2', 'vf_sum', 'vf_coeff',
+        'kk_raw', 'kk_norm', 'k_mod',
+        'v_after_mix',
+        'wkv_out', 'state_after',
+        'gn_out', 'bonus', 'gn_plus_bonus',
+        'gated', 'tmix_out',
+    ]
+    for stage in tmix_stages:
+        if stage in fp16_tmix_mid and stage in q5k_tmix_mid:
+            print_metrics(f"tmix.{stage}", q5k_tmix_mid[stage], fp16_tmix_mid[stage])
+
+    # --- 残差 + LN2 ---
+    print("\n--- Residual & LN2 ---")
     print_metrics("x_after_att", q5k_x_after_att, x_after_att)
     print_metrics("LN2 output", q5k_ln2_out, ln2_out)
-    print_metrics("CMix output", q5k_cmix_out, cmix_out)
+
+    # --- CMix 中间值逐步对比 ---
+    print("\n--- CMix stage-by-stage ---")
+    cmix_stages = ['k', 'k_expanded', 'k_act', 'out']
+    for stage in cmix_stages:
+        if stage in fp16_cmix_mid and stage in q5k_cmix_mid:
+            print_metrics(f"cmix.{stage}", q5k_cmix_mid[stage], fp16_cmix_mid[stage])
+
+    # --- 误差分离分析: gated @ O_ ---
+    print("\n--- Error decomposition: tmix_out = gated @ O_ ---")
+    tmix_only_O_err = fp16_tmix_mid['gated'] @ O_dq
+    print_metrics("fp16_gated @ O_dq (O only)", tmix_only_O_err, fp16_tmix_mid['tmix_out'])
+    tmix_only_gated_err = q5k_tmix_mid['gated'] @ O_
+    print_metrics("q5k_gated @ fp16_O (gated only)", tmix_only_gated_err, fp16_tmix_mid['tmix_out'])
+    print_metrics("q5k_gated @ O_dq (both)", q5k_tmix_mid['tmix_out'], fp16_tmix_mid['tmix_out'])
+
+    # 值域统计
+    def val_stats(name, t):
+        a = t.detach().cpu().float().numpy().flatten()
+        print(f"  {name:35s} range=[{a.min():+.6f}, {a.max():+.6f}]  "
+              f"|mean|={np.abs(a).mean():.6f}  std={a.std():.6f}")
+    print("\n--- Value range stats ---")
+    val_stats("fp16 gated", fp16_tmix_mid['gated'])
+    val_stats("q5k  gated", q5k_tmix_mid['gated'])
+    val_stats("fp16 tmix_out", fp16_tmix_mid['tmix_out'])
+    val_stats("q5k  tmix_out", q5k_tmix_mid['tmix_out'])
+    val_stats("fp16 gn_plus_bonus", fp16_tmix_mid['gn_plus_bonus'])
+    val_stats("fp16 g_vec", fp16_tmix_mid['g_vec'])
+    val_stats("fp16 r", fp16_tmix_mid['r'])
+    val_stats("fp16 k", fp16_tmix_mid['k'])
+    val_stats("fp16 v", fp16_tmix_mid['v'])
+
+    # 逐元素误差分布
+    print("\n--- Per-element error distribution: gated ---")
+    gated_fp = fp16_tmix_mid['gated'].float().numpy()
+    gated_q5 = q5k_tmix_mid['gated'].float().numpy()
+    gated_diff = np.abs(gated_q5 - gated_fp)
+    gated_rel = np.zeros_like(gated_diff)
+    nz = np.abs(gated_fp) > 0
+    gated_rel[nz] = gated_diff[nz] / np.abs(gated_fp[nz])
+    # 找最大误差的元素
+    worst_idx = np.argsort(gated_rel)[::-1][:5]
+    for idx in worst_idx:
+        print(f"  idx={idx}: fp16={gated_fp[idx]:+.6f} q5k={gated_q5[idx]:+.6f} "
+              f"abs_err={gated_diff[idx]:.6f} rel_err={gated_rel[idx]*100:.1f}%")
+
+    print("\n--- Per-element error distribution: tmix_out ---")
+    tout_fp = fp16_tmix_mid['tmix_out'].float().numpy()
+    tout_q5 = q5k_tmix_mid['tmix_out'].float().numpy()
+    tout_diff = np.abs(tout_q5 - tout_fp)
+    tout_rel = np.zeros_like(tout_diff)
+    nz = np.abs(tout_fp) > 0
+    tout_rel[nz] = tout_diff[nz] / np.abs(tout_fp[nz])
+    worst_idx = np.argsort(tout_rel)[::-1][:5]
+    for idx in worst_idx:
+        print(f"  idx={idx}: fp16={tout_fp[idx]:+.6f} q5k={tout_q5[idx]:+.6f} "
+              f"abs_err={tout_diff[idx]:.6f} rel_err={tout_rel[idx]*100:.1f}%")
+
+    # --- 误差分离分析: 各级矩阵乘 ---
+    print("\n--- Error decomposition: r = xr @ R_ ---")
+    r_only_R_err = fp16_tmix_mid['xr'] @ R_dq
+    print_metrics("fp16_xr @ R_dq (R only)", r_only_R_err, fp16_tmix_mid['r'])
+
+    print("\n--- Error decomposition: w path (tw->w2->sigmoid) ---")
+    # tw = xw @ w1: 只看 w1 误差
+    tw_only_w1 = fp16_tmix_mid['xw'] @ w1_dq
+    print_metrics("fp16_xw @ w1_dq (w1 only)", tw_only_w1, fp16_tmix_mid['tw'])
+    # tw_tanh -> w_proj2 = tanh(tw) @ w2: 用 fp16 tw_tanh + q5k w2
+    wp2_only_w2 = fp16_tmix_mid['tw_tanh'] @ w2_dq
+    print_metrics("fp16_tw_tanh @ w2_dq (w2 only)", wp2_only_w2, fp16_tmix_mid['w_proj2'])
+
+    # --- 最终输出 ---
+    print("\n--- Final ---")
     print_metrics("x_out (end-to-end)", q5k_x_out, x_out)
 
     print("\n" + "=" * 60)
