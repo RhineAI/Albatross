@@ -499,7 +499,7 @@ def RWKV_x070_TMix_one(
     print_information('k_k', k_k)
     print_information('kk (normalized)', kk)
 
-    k = k * (1 + (a-1) * k_a)
+    k = k * (1 + (a-1) * k_a) # lerp a with 1, mul k to k
     print_information('k_a', k_a)
     print_information('k (after k_a)', k)
 
